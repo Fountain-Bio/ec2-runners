@@ -14,11 +14,14 @@ import {
 import { JobConfigError, instanceRequirements, type LaunchSpec } from "./labels.ts";
 import { errorMessage, log } from "./log.ts";
 
-export const TAG_STACK = "ec2-runners:stack";
-export const TAG_RUNNER = "ec2-runners:runner-name";
-export const TAG_REPO = "ec2-runners:repo";
-export const TAG_JOB = "ec2-runners:job-id";
-export const TAG_RUN = "ec2-runners:run-id";
+// Tags on every runner instance and its volumes. The stack tag scopes the
+// janitor's TerminateInstances permission in template.yaml, and the runner
+// name ties an instance to its GitHub registration. The repository and run
+// ID are for people reading the EC2 console.
+const TAG_STACK = "ec2-runners:stack";
+const TAG_RUNNER = "ec2-runners:runner-name";
+const TAG_REPO = "ec2-runners:repo";
+const TAG_RUN = "ec2-runners:run-id";
 
 // Every EC2 instance state. The janitor looks at all of them.
 export const ALL_STATES = ["pending", "running", "shutting-down", "stopping", "stopped", "terminated"];
@@ -146,8 +149,12 @@ export interface LaunchOptions {
   ami: Ami;
   // Base64 boot script from buildUserData.
   userData: string;
-  // Applied to the instance and its volumes. Must include TAG_RUNNER.
-  tags: Record<string, string | number>;
+  // The GitHub registration the instance runs, its stack, and the job it was
+  // launched for. These become the instance and volume tags.
+  runnerName: string;
+  stackName: string;
+  repo: string;
+  runId: number;
   random?: () => number;
 }
 
@@ -162,14 +169,21 @@ export interface LaunchResult {
 // version, because EC2 Fleet cannot override user data and the user data
 // carries the job's JIT runner config. The version is deleted after launch.
 export async function launchRunner(ec2: Ec2, opts: LaunchOptions): Promise<LaunchResult> {
-  const { launchTemplateId, sourceVersion, subnetIds, spec, ami, userData, tags, random } = opts;
-  const tagList = Object.entries(tags).map(([Key, Value]) => ({ Key, Value: String(Value) }));
+  const { launchTemplateId, sourceVersion, subnetIds, spec, ami, userData, runnerName, stackName, repo, runId, random } = opts;
+  const tagList = [
+    { Key: "Name", Value: runnerName },
+    { Key: TAG_STACK, Value: stackName },
+    { Key: TAG_RUNNER, Value: runnerName },
+    { Key: TAG_REPO, Value: repo },
+    { Key: TAG_RUN, Value: String(runId) },
+  ];
 
   const { LaunchTemplateVersion } = await ec2.send(
     new CreateLaunchTemplateVersionCommand({
       LaunchTemplateId: launchTemplateId,
       SourceVersion: String(sourceVersion),
-      VersionDescription: String(tags[TAG_RUNNER]),
+      // deleteStaleLaunchTemplateVersions recognizes per-launch versions by this.
+      VersionDescription: runnerName,
       LaunchTemplateData: {
         ImageId: ami.imageId,
         UserData: userData,

@@ -324,7 +324,7 @@ test("reconciler launches a runner for a queued job with none available", async 
     "ec2-runners:stack": PREFIX,
     "ec2-runners:runner-name": jit.body.name,
     "ec2-runners:repo": "example-org/app",
-    "ec2-runners:job-id": "555",
+    "ec2-runners:run-id": "777",
   });
   expect(fleetCalls()).toHaveLength(1);
 });

@@ -155,7 +155,10 @@ const launchOpts = (launchSpec: LaunchSpec): LaunchOptions => ({
   spec: launchSpec,
   ami,
   userData: "dXNlcmRhdGE=",
-  tags: { Name: "r-1", "ec2-runners:runner-name": "r-1", "ec2-runners:stack": "r" },
+  runnerName: "r-1",
+  stackName: "r",
+  repo: "example-org/app",
+  runId: 777,
 });
 
 test("launchRunner tries spot in each subnet, then on-demand, one subnet per call", async () => {

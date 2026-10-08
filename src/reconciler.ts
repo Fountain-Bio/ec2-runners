@@ -11,11 +11,6 @@ import { github } from "./app-secret.ts";
 import { reconcilerConfig, type ReconcilerConfig } from "./config.ts";
 import {
   ALL_STATES,
-  TAG_JOB,
-  TAG_REPO,
-  TAG_RUN,
-  TAG_RUNNER,
-  TAG_STACK,
   assertInstanceTypesExist,
   launchRunner,
   listRunnerInstances,
@@ -208,14 +203,10 @@ async function launchForJob(config: ReconcilerConfig, gh: GitHubClient, job: Que
         maxMinutes: config.MAX_MINUTES,
         runner,
       }),
-      tags: {
-        Name: name,
-        [TAG_STACK]: config.RUNNER_PREFIX,
-        [TAG_RUNNER]: name,
-        [TAG_REPO]: job.repo,
-        [TAG_RUN]: job.runId,
-        [TAG_JOB]: job.jobId,
-      },
+      runnerName: name,
+      stackName: config.RUNNER_PREFIX,
+      repo: job.repo,
+      runId: job.runId,
     });
     log("launched runner", { name, repo: job.repo, jobId: job.jobId, ...result, spec });
   } catch (err) {
