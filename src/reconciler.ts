@@ -18,10 +18,10 @@ import {
   type Ami,
 } from "./ec2.ts";
 import { isGitHubError, type GitHubClient, type RunnerDownload } from "./github.ts";
-import { jobStore, type JobStore } from "./jobs.ts";
+import { jobStore, type JobStore, type QueuedJob } from "./jobs.ts";
 import { JobConfigError, parseLabels } from "./labels.ts";
 import { errorMessage, log } from "./log.ts";
-import { LAUNCH_GRACE_MS, availableRunners, runnerName, unmatchedJobs, type QueuedJob } from "./pool.ts";
+import { LAUNCH_GRACE_MS, availableRunners, runnerName, unmatchedJobs } from "./pool.ts";
 import { buildUserData } from "./userdata.ts";
 
 // Launches the reconciler runs at once.

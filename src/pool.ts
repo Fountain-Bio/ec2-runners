@@ -9,18 +9,6 @@
 
 import type { RunnerInstance } from "./ec2.ts";
 
-// A job that GitHub reported as queued and that has not started yet.
-export interface QueuedJob {
-  jobId: number;
-  // "owner/name".
-  repo: string;
-  runId: number;
-  labels: string[];
-  // Runners launched for this job that the janitor terminated after they sat
-  // idle, with the job still queued.
-  idleRunners: number;
-}
-
 // The fields this module reads from a GitHub self-hosted runner registration.
 export interface Registration {
   name: string;

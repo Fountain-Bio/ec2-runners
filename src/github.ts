@@ -80,7 +80,7 @@ export class GitHubClient {
     return data;
   }
 
-  // repo is "owner/name".
+  // repo is "owner/name", which the jobs table schema enforces.
   async getJob(repo: string, jobId: number) {
     const gh = await this.octokit();
     const [owner = "", name = ""] = repo.split("/");

@@ -7,18 +7,23 @@
 import { ConditionalCheckFailedException, DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import { DynamoDBDocumentClient, PutCommand, UpdateCommand, paginateScan } from "@aws-sdk/lib-dynamodb";
 import * as z from "zod";
-import type { QueuedJob } from "./pool.ts";
+import { log } from "./log.ts";
 
 const TTL_SECONDS = 24 * 60 * 60;
 
-// A row the reconciler acts on.
+// A job that GitHub reported as queued and that has not started yet, as the
+// reconciler reads it from the table.
 const QueuedRow = z.object({
   jobId: z.int(),
-  repo: z.string(),
+  // "owner/name".
+  repo: z.string().regex(/^[^/]+\/[^/]+$/),
   runId: z.int(),
   labels: z.array(z.string()),
+  // Runners launched for this job that the janitor terminated after they sat
+  // idle, with the job still queued.
   idleRunners: z.int().default(0),
 });
+export type QueuedJob = z.infer<typeof QueuedRow>;
 
 export class JobStore {
   private readonly doc: DynamoDBDocumentClient;
@@ -134,7 +139,12 @@ export class JobStore {
       },
     );
     for await (const page of pages) {
-      for (const item of page.Items ?? []) jobs.push(QueuedRow.parse(item));
+      for (const item of page.Items ?? []) {
+        // One unreadable row is skipped so it cannot stop every other job's launch.
+        const row = QueuedRow.safeParse(item);
+        if (row.success) jobs.push(row.data);
+        else log("skipped unreadable jobs table row", { jobId: item.jobId, error: z.prettifyError(row.error) });
+      }
     }
     return jobs;
   }
