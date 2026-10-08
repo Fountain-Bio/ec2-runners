@@ -536,7 +536,7 @@ Resources:
       Targets:
         - Id: janitor
           Arn: !GetAtt JanitorFunction.Arn
-        # Catches jobs whose webhook was lost and retries failed launches.
+        # Retries failed launches and replaces runners the janitor terminated.
         - Id: reconciler
           Arn: !GetAtt ReconcilerFunction.Arn
 
