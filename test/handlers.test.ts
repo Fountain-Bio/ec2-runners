@@ -38,6 +38,7 @@ Object.assign(process.env, {
   AMI_OWNER: "135269210855",
   AMI_NAME_PREFIX: "runs-on-v2.2-",
   RUNNER_VERSION: "latest",
+  BOOT_LOG_GROUP: "/ec2-runners/ec2-runners/boot",
   ALLOW_PUBLIC_REPOS: "false",
 });
 

@@ -90,6 +90,8 @@ test("buildUserData produces valid bash with the JIT config and cache settings",
     region: "us-west-2",
     maxMinutes: 360,
     runner,
+    runnerName: "ec2-runners-555-mabc",
+    bootLogGroup: "/ec2-runners/ec2-runners/boot",
   });
   const script = Buffer.from(b64, "base64").toString("utf8");
   expect(script.startsWith("#!/bin/bash\n")).toBe(true);
@@ -103,6 +105,10 @@ test("buildUserData produces valid bash with the JIT config and cache settings",
   expect(script).toContain(`RUNNER_SHA256='${runner.sha256}'`);
   expect(script).toContain(`RUNNER_URL='${runner.url}'`);
   expect(script).toContain('sha256sum -c -');
+  expect(script).toContain("RUNNER_NAME='ec2-runners-555-mabc'");
+  expect(script).toContain("BOOT_LOG_GROUP='/ec2-runners/ec2-runners/boot'");
+  expect(script).toContain("trap 'exit 143' TERM");
+  expect(script).toMatch(/finish\(\) \{\n(?:  #.*\n)*  exec >>\/var\/log\/ec2-runner-boot\.log 2>&1\n/);
   const dir = mkdtempSync(join(tmpdir(), "userdata-"));
   const file = join(dir, "boot.sh");
   writeFileSync(file, script);
@@ -110,7 +116,7 @@ test("buildUserData produces valid bash with the JIT config and cache settings",
 });
 
 test("buildUserData quotes values containing single quotes", () => {
-  const script = Buffer.from(buildUserData({ jitConfig: "a'b", cacheBucket: "c", region: "r", maxMinutes: 10, runner }), "base64").toString();
+  const script = Buffer.from(buildUserData({ jitConfig: "a'b", cacheBucket: "c", region: "r", maxMinutes: 10, runner, runnerName: "n", bootLogGroup: "g" }), "base64").toString();
   expect(script).toMatch(/JIT_CONFIG='a'\\''b'/);
 });
 

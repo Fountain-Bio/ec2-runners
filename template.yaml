@@ -220,6 +220,13 @@ Resources:
               - Effect: Allow
                 Action: [s3:ListBucket]
                 Resource: !GetAtt CacheBucket.Arn
+        - PolicyName: boot-logs
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: [logs:CreateLogStream, logs:PutLogEvents]
+                Resource: !GetAtt BootLogs.Arn
 
   RunnerInstanceProfile:
     Type: AWS::IAM::InstanceProfile
@@ -458,6 +465,13 @@ Resources:
     Properties:
       LogGroupName: !Sub /aws/lambda/${AWS::StackName}-janitor
       RetentionInDays: 14
+  # Runner boot logs, uploaded by each instance's boot script when it exits.
+  # One stream per runner name.
+  BootLogs:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /ec2-runners/${AWS::StackName}/boot
+      RetentionInDays: 14
 
   WebhookFunction:
     Type: AWS::Lambda::Function
@@ -540,6 +554,7 @@ Resources:
           AMI_OWNER: !Ref AmiOwner
           AMI_NAME_PREFIX: !Ref AmiNamePrefix
           RUNNER_VERSION: !Ref RunnerVersion
+          BOOT_LOG_GROUP: !Ref BootLogs
 
   ReconcilerAsyncConfig:
     Type: AWS::Lambda::EventInvokeConfig

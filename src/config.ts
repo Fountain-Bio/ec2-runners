@@ -38,6 +38,7 @@ const ReconcilerConfig = z.object({
   AMI_OWNER: z.string().min(1),
   AMI_NAME_PREFIX: z.string().min(1),
   RUNNER_VERSION: z.string().min(1),
+  BOOT_LOG_GROUP: z.string().min(1),
 });
 
 const JanitorConfig = z.object({

@@ -158,7 +158,7 @@ The reconciler registers runners in the org's Default runner group (ID 1). Jobs 
 
 ### 6. Test
 
-Push a workflow with `runs-on: [ec2]`. In the GitHub App's Advanced tab, recent deliveries should show `202` for `queued` events and `200` for most other events. Logs are in CloudWatch under `/aws/lambda/<stack>-webhook`, `-reconciler`, and `-janitor`. The boot log on an instance is `/var/log/ec2-runner-boot.log`, reachable through Session Manager while the instance is alive.
+Push a workflow with `runs-on: [ec2]`. In the GitHub App's Advanced tab, recent deliveries should show `202` for `queued` events and `200` for most other events. Logs are in CloudWatch under `/aws/lambda/<stack>-webhook`, `-reconciler`, and `-janitor`. Each runner's boot log, which includes the runner's own output, is at `/var/log/ec2-runner-boot.log` on the instance (reachable through Session Manager while it is alive) and is copied to the `/ec2-runners/<stack>/boot` log group, in a stream named after the runner, when the boot script exits or the instance is terminated.
 
 ## Parameters
 

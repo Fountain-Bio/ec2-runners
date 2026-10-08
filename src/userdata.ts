@@ -12,6 +12,10 @@ export interface UserDataOptions {
   // actions/runner tarball to install when the AMI has none at /opt/ec2-runner.
   // The script refuses a download whose SHA-256 differs from runner.sha256.
   runner: { url: string; sha256: string };
+  // The runner's registration name, used as its boot log's stream name.
+  runnerName: string;
+  // CloudWatch Logs group that receives the boot log when the script exits.
+  bootLogGroup: string;
 }
 
 function shellQuote(value: string): string {
@@ -19,7 +23,7 @@ function shellQuote(value: string): string {
 }
 
 // Returns the script base64-encoded, as EC2 launch template user data expects.
-export function buildUserData({ jitConfig, cacheBucket, region, maxMinutes, runner }: UserDataOptions): string {
+export function buildUserData({ jitConfig, cacheBucket, region, maxMinutes, runner, runnerName, bootLogGroup }: UserDataOptions): string {
   const script = `#!/bin/bash
 set -euo pipefail
 exec > >(tee -a /var/log/ec2-runner-boot.log) 2>&1
@@ -32,11 +36,42 @@ CACHE_BUCKET=${shellQuote(cacheBucket)}
 REGION=${shellQuote(region)}
 RUNNER_URL=${shellQuote(runner.url)}
 RUNNER_SHA256=${shellQuote(runner.sha256)}
+RUNNER_NAME=${shellQuote(runnerName)}
+BOOT_LOG_GROUP=${shellQuote(bootLogGroup)}
 RUNNER_DIR=/opt/ec2-runner
 HOOK_DIR=/opt/ec2-runner-hooks
 
-finish() { echo "runner exited; powering off"; shutdown -h now; }
+# The boot log is lost when the instance terminates, so it is copied to
+# CloudWatch Logs on exit, one stream per runner. CloudWatch takes at most
+# 256 KB per event, so the upload keeps the log's last 200 KB. The AWS CLI
+# and jq come with the GitHub-style runner images; without them the upload
+# is skipped.
+upload_boot_log() {
+  if ! command -v aws >/dev/null 2>&1 || ! command -v jq >/dev/null 2>&1; then
+    echo "aws or jq not installed; boot log not uploaded"
+    return 0
+  fi
+  tail -c 200000 /var/log/ec2-runner-boot.log \
+    | jq -Rs --argjson ts "$(date +%s%3N)" '[{timestamp: $ts, message: .}]' > /tmp/boot-log-events.json
+  aws logs create-log-stream --region "$REGION" --log-group-name "$BOOT_LOG_GROUP" --log-stream-name "$RUNNER_NAME" 2>/dev/null || true
+  aws logs put-log-events --region "$REGION" --log-group-name "$BOOT_LOG_GROUP" --log-stream-name "$RUNNER_NAME" \
+    --log-events file:///tmp/boot-log-events.json >/dev/null
+}
+
+finish() {
+  # Writes go straight to the log file from here on. On termination SIGTERM
+  # also stops the tee process above, and an echo into its closed pipe would
+  # kill this script with SIGPIPE before the upload.
+  exec >>/var/log/ec2-runner-boot.log 2>&1
+  echo "runner exited; powering off"
+  upload_boot_log || echo "boot log upload failed"
+  shutdown -h now
+}
 trap finish EXIT
+# Termination (by the janitor or at MaxMinutes) stops this script with
+# SIGTERM. Exiting on it runs the EXIT trap, so the boot log is uploaded
+# while the network is still up.
+trap 'exit 143' TERM
 
 # ---- Local NVMe instance storage ----
 # On instance types with instance-store SSDs, put Docker, containerd, and the

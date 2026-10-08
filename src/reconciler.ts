@@ -142,7 +142,7 @@ async function reconcileJob(config: ReconcilerConfig, jobs: JobStore, gh: GitHub
     const reason =
       `${job.idleRunners} runners launched for this job sat idle until they were terminated, and GitHub never assigned the job to them. ` +
       `Either runner group ${config.RUNNER_GROUP_ID} does not allow ${job.repo} (or public repositories), ` +
-      `or the runners failed to connect (see /var/log/ec2-runner-boot.log on a new runner).`;
+      `or the runners failed to connect (see their boot logs in ${config.BOOT_LOG_GROUP}).`;
     log("job never assigned to its runners", { jobId: job.jobId, repo: job.repo, idleRunners: job.idleRunners });
     if (await jobs.markFailed(job.jobId, reason)) {
       await alert(config.ALERT_TOPIC_ARN, `Runners for a job in ${job.repo} keep going unused`, `${current.html_url}\n\n${reason}`);
@@ -201,6 +201,8 @@ async function launchForJob(config: ReconcilerConfig, gh: GitHubClient, job: Que
         region: config.AWS_REGION,
         maxMinutes: config.MAX_MINUTES,
         runner,
+        runnerName: name,
+        bootLogGroup: config.BOOT_LOG_GROUP,
       }),
       runnerName: name,
       stackName: config.RUNNER_PREFIX,
