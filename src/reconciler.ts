@@ -5,6 +5,7 @@
 // each one sees the runners the previous one registered.
 
 import { EC2Client } from "@aws-sdk/client-ec2";
+import type { Context } from "aws-lambda";
 import { alert } from "./alerts.ts";
 import { github } from "./app-secret.ts";
 import { reconcilerConfig, type ReconcilerConfig } from "./config.ts";
@@ -36,14 +37,23 @@ const ALERT_AFTER_FAILURES = 3;
 // A job that still waits after this many of its runners sat idle until the
 // janitor terminated them is failed, since another runner would idle too.
 const MAX_IDLE_RUNNERS = 2;
+// A launch takes up to about a minute when EC2 Fleet tries every subnet. The
+// reconciler starts no launch with less than this much time left before its
+// Lambda timeout, so a timeout never cuts a launch off partway.
+const LAUNCH_TIME_BUDGET_MS = 2 * 60_000;
 // How often the reconciler rereads the runner group's public-repository setting.
 const RUNNER_GROUP_CHECK_MS = 60 * 60_000;
 
 const ec2 = new EC2Client({});
 
-type LaunchOutcome = "launched" | "already started" | "gone" | "failed" | "will retry" | "error";
+type LaunchOutcome = "launched" | "already started" | "gone" | "failed" | "will retry" | "error" | "deferred";
 
-export async function reconciler(): Promise<{ queued: number; available: number; outcomes: Record<string, LaunchOutcome> }> {
+// The schedule passes an EventBridge event and the webhook passes none; the
+// reconciler reads neither. The context is absent in tests.
+export async function reconciler(
+  _event?: unknown,
+  context?: Pick<Context, "getRemainingTimeInMillis">,
+): Promise<{ queued: number; available: number; outcomes: Record<string, LaunchOutcome> }> {
   const config = reconcilerConfig();
   const jobs = jobStore(config.JOBS_TABLE);
   const now = Date.now();
@@ -61,6 +71,11 @@ export async function reconciler(): Promise<{ queued: number; available: number;
   // Each job's errors stay with that job, so one failure never ends the
   // reconcile while other launches are still running.
   await forEachLimit(uncovered, LAUNCH_CONCURRENCY, async (job) => {
+    // A deferred job is still queued, so the next reconcile takes it up.
+    if (context && context.getRemainingTimeInMillis() < LAUNCH_TIME_BUDGET_MS) {
+      outcomes[job.jobId] = "deferred";
+      return;
+    }
     outcomes[job.jobId] = await reconcileJob(config, jobs, gh, job).catch((err) => {
       log("job reconcile failed, will retry", { jobId: job.jobId, repo: job.repo, error: errorMessage(err) });
       return "error" as const;

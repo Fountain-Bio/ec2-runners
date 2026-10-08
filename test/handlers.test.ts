@@ -387,6 +387,15 @@ test("reconciler launches nothing while the runner group allows public repositor
   }
 });
 
+test("reconciler starts no launch without time to finish it", async () => {
+  queuedRow(560, ["ec2"]);
+  githubJob("example-org/app", 560);
+  const result = await reconciler(undefined, { getRemainingTimeInMillis: () => 60_000 });
+  expect(result.outcomes).toEqual({ 560: "deferred" });
+  expect(table.get(560)?.status).toBe("queued");
+  expect(fleetCalls()).toHaveLength(0);
+});
+
 test("reconciler marks done a job GitHub already started", async () => {
   queuedRow(555, ["ec2"]);
   githubJob("example-org/app", 555, "in_progress");
