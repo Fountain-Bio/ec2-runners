@@ -54,33 +54,51 @@ export function canRun(runnerLabels: readonly string[], jobLabels: readonly stri
   return jobLabels.every((l) => have.has(l.toLowerCase()));
 }
 
-// The registrations that can still take a queued job: not busy, and either
-// backed by a pending or running instance, or registered less than graceMs ago
-// with no instance yet because the reconciler is launching it right now.
-export function availableRunners({
+// Where a runner registration stands:
+// - busy: running a job.
+// - live: idle, with a pending or running instance.
+// - launching: idle, with no instance yet, registered less than graceMs ago
+//   because the reconciler is launching it right now.
+// - stale: idle, with an instance that has ended, or with no instance after
+//   the grace period because the reconciler stopped partway through a launch.
+export type RunnerState = "busy" | "live" | "launching" | "stale";
+
+// The stack's runner registrations and instances at one moment.
+export interface PoolSnapshot<R extends Registration = Registration> {
+  prefix: string;
+  registrations: readonly R[];
+  instances: readonly Pick<RunnerInstance, "runnerName" | "state">[];
+  now: number;
+  graceMs: number;
+}
+
+// Classifies the stack's registrations. Registrations whose names this stack
+// did not create are left out.
+export function classifyRunners<R extends Registration>({
   prefix,
   registrations,
   instances,
   now,
   graceMs,
-}: {
-  prefix: string;
-  registrations: readonly Registration[];
-  instances: readonly RunnerInstance[];
-  now: number;
-  graceMs: number;
-}): { name: string; labels: string[] }[] {
+}: PoolSnapshot<R>): { registration: R; state: RunnerState }[] {
   const stateByRunner = new Map(instances.map((i) => [i.runnerName, i.state]));
-  return registrations
-    .filter((r) => {
-      if (r.busy) return false;
-      const parsed = parseRunnerName(prefix, r.name);
-      if (!parsed) return false;
-      const state = stateByRunner.get(r.name);
-      if (state === undefined) return now - parsed.launchedAt < graceMs;
-      return state === "pending" || state === "running";
-    })
-    .map((r) => ({ name: r.name, labels: r.labels.map((l) => l.name) }));
+  return registrations.flatMap((registration) => {
+    const parsed = parseRunnerName(prefix, registration.name);
+    if (!parsed) return [];
+    const instanceState = stateByRunner.get(registration.name);
+    let state: RunnerState;
+    if (registration.busy) state = "busy";
+    else if (instanceState === undefined) state = now - parsed.launchedAt < graceMs ? "launching" : "stale";
+    else state = instanceState === "pending" || instanceState === "running" ? "live" : "stale";
+    return [{ registration, state }];
+  });
+}
+
+// The registrations that can still take a queued job, with their labels.
+export function availableRunners(snapshot: PoolSnapshot): { name: string; labels: string[] }[] {
+  return classifyRunners(snapshot)
+    .filter(({ state }) => state === "live" || state === "launching")
+    .map(({ registration: r }) => ({ name: r.name, labels: r.labels.map((l) => l.name) }));
 }
 
 // Pairs queued jobs with available runners so that as many jobs as possible

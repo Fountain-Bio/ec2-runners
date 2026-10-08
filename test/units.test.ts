@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { JobConfigError, instanceRequirements, parseLabels, type LaunchSpec } from "../src/labels.ts";
 import { verifySignature } from "../src/github.ts";
-import { availableRunners, canRun, parseRunnerName, runnerName, unmatchedJobs } from "../src/pool.ts";
+import { availableRunners, canRun, classifyRunners, parseRunnerName, runnerName, unmatchedJobs } from "../src/pool.ts";
 import { buildUserData } from "../src/userdata.ts";
 import {
   assertInstanceTypesExist,
@@ -299,6 +299,28 @@ test("availableRunners keeps idle runners that are running or still launching", 
   // 1 is running and idle. 4 has no instance yet but registered 2 minutes ago.
   // 2 is busy, 3's instance ended, and 5 never got an instance within the grace period.
   expect(available.map((r) => r.name)).toEqual([registrations[0]!.name, registrations[3]!.name]);
+});
+
+test("classifyRunners treats an ended instance and an overdue launch as stale", () => {
+  const now = Date.parse("2026-10-08T12:00:00Z");
+  const reg = (jobId: number, minutesAgo: number, busy = false) => ({
+    name: runnerName("ec2-runners", jobId, now - minutesAgo * 60_000),
+    busy,
+    labels: [],
+  });
+  const [running, busyEnded, ended, launching, overdue] = [reg(1, 2), reg(2, 30, true), reg(3, 30), reg(4, 2), reg(5, 30)];
+  const states = classifyRunners({
+    prefix: "ec2-runners",
+    registrations: [running, busyEnded, ended, launching, overdue],
+    instances: [
+      { runnerName: running.name, state: "running" },
+      { runnerName: busyEnded.name, state: "terminated" },
+      { runnerName: ended.name, state: "shutting-down" },
+    ],
+    now,
+    graceMs: 10 * 60_000,
+  }).map((c) => c.state);
+  expect(states).toEqual(["live", "busy", "stale", "launching", "stale"]);
 });
 
 test("unmatchedJobs needs no launch when two jobs swap runners", () => {

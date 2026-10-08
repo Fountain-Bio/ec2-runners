@@ -8,7 +8,7 @@ import { janitorConfig } from "./config.ts";
 import { ALL_STATES, deleteStaleLaunchTemplateVersions, listRunnerInstances, terminateInstances } from "./ec2.ts";
 import { jobStore } from "./jobs.ts";
 import { errorMessage, log } from "./log.ts";
-import { LAUNCH_GRACE_MS, parseRunnerName } from "./pool.ts";
+import { LAUNCH_GRACE_MS, classifyRunners, parseRunnerName } from "./pool.ts";
 
 const ec2 = new EC2Client({});
 
@@ -51,17 +51,11 @@ export async function janitor(): Promise<{ terminated: string[]; removedRunners:
     await jobs.recordIdleRunner(jobId).catch((e) => log("failed to record idle runner", { jobId, error: errorMessage(e) }));
   }
 
-  // A registration is stale when its instance has ended or was just
-  // terminated, or when it never got an instance within the launch grace
-  // period because the reconciler stopped partway through a launch.
-  const withInstance = new Set(allInstances.map((i) => i.runnerName));
-  const live = new Set(instances.filter((i) => !toTerminate.includes(i.instanceId)).map((i) => i.runnerName));
-  const stale = runners.filter((r) => {
-    if (r.busy || live.has(r.name)) return false;
-    if (withInstance.has(r.name)) return true;
-    const parsed = parseRunnerName(config.RUNNER_PREFIX, r.name);
-    return parsed !== undefined && now - parsed.launchedAt > LAUNCH_GRACE_MS;
-  });
+  // Instances terminated above count as ended.
+  const afterTermination = allInstances.map((i) => (toTerminate.includes(i.instanceId) ? { ...i, state: "shutting-down" } : i));
+  const stale = classifyRunners({ prefix: config.RUNNER_PREFIX, registrations: runners, instances: afterTermination, now, graceMs: LAUNCH_GRACE_MS })
+    .filter(({ state }) => state === "stale")
+    .map(({ registration }) => registration);
   for (const r of stale) {
     await gh.deleteRunner(r.id).catch((e) => log("failed to delete stale runner", { name: r.name, error: errorMessage(e) }));
   }
