@@ -366,6 +366,20 @@ test("reconciler marks done a job GitHub already started", async () => {
   expect(fleetCalls()).toHaveLength(0);
 });
 
+test("reconciler keeps launching other jobs when one job's GitHub lookup fails", async () => {
+  queuedRow(555, ["ec2"]);
+  queuedRow(556, ["ec2"]);
+  queuedRow(557, ["ec2"]);
+  githubJob("example-org/app", 556);
+  // Job 555 has no route, so GitHub answers 500. Job 557's repository is gone.
+  ghRoutes["GET /repos/example-org/app/actions/jobs/557"] = { status: 404, body: { message: "Not Found" } };
+
+  const result = await reconciler();
+  expect(result.outcomes).toEqual({ 555: "error", 556: "launched", 557: "gone" });
+  expect(table.get(555)?.status).toBe("queued");
+  expect(table.get(557)?.status).toBe("done");
+});
+
 test("reconciler fails a job whose labels no instance type matches, and alerts once", async () => {
   queuedRow(556, ["ec2", "cpu=3"]);
   githubJob("example-org/app", 556);
