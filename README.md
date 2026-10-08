@@ -115,17 +115,17 @@ The script deploys to us-west-2 unless `AWS_REGION` is set. It creates an artifa
 
 ### 2. Connect Slack
 
-Alerts reach Slack through Amazon Q Developer in chat applications (formerly AWS Chatbot), which needs a one-time authorization per AWS account:
-
-1. In the development account, open the Amazon Q Developer in chat applications console, choose Slack under "Configure a chat client", and approve your Slack workspace in the Slack prompt.
-2. Copy the workspace ID that the console then shows.
-3. Deploy again with the workspace and channel. `<channel ID>` is #alerts.
+Alerts reach Slack through Amazon Q Developer in chat applications (formerly AWS Chatbot). The account's channel configuration for #alerts is `slack-alerts`, created in that console. Add the stack's alert topic to it:
 
 ```bash
-AWS_PROFILE=dev ./deploy.sh SlackWorkspaceId=<workspace ID> SlackChannelId=<channel ID>
+TOPIC=$(aws cloudformation describe-stacks --profile dev --stack-name ec2-runners \
+  --query "Stacks[0].Outputs[?OutputKey=='AlertTopicArn'].OutputValue" --output text)
+aws chatbot update-slack-channel-configuration --profile dev --region us-east-2 \
+  --chat-configuration-arn <channel configuration ARN> \
+  --slack-channel-id <channel ID> --sns-topic-arns "$TOPIC"
 ```
 
-The stack creates the channel configuration, subscribed to the alert topic, with a CloudWatch read-only role and guardrail. A private channel also needs `/invite @Amazon Q` in Slack.
+`--sns-topic-arns` replaces the configuration's topic list, so include any topics already on it (`aws chatbot describe-slack-channel-configurations --region us-east-2` lists them).
 
 ### 3. Create the GitHub App
 
@@ -160,16 +160,6 @@ The reconciler registers runners in the org's Default runner group (ID 1). Jobs 
 
 Push a workflow with `runs-on: [ec2]`. In the GitHub App's Advanced tab, recent deliveries should show `202` for `queued` events and `200` for most other events. Logs are in CloudWatch under `/aws/lambda/<stack>-webhook`, `-reconciler`, and `-janitor`. Each runner's boot log, which includes the runner's own output, is at `/var/log/ec2-runner-boot.log` on the instance (reachable through Session Manager while it is alive) and is copied to the `/ec2-runners/<stack>/boot` log group, in a stream named after the runner, when the boot script exits or the instance is terminated.
 
-### 7. Give on-call access
-
-The stack creates the `oncall` IAM user with the `<stack>-oncall` policy. That policy can read the function and boot logs, alarms, jobs table, runner instances, functions, and the stack, and can start a reconcile or janitor pass. It cannot read the GitHub App secret's value or change any resource. Create its access keys and store them in 1Password:
-
-```bash
-aws iam create-access-key --profile dev --user-name oncall
-```
-
-To give the same access to an SSO role instead, attach the policy in the `OncallPolicyArn` output to it, and deploy with `OncallUserName=` (empty) to skip the user.
-
 ## Parameters
 
 | Parameter | Default | Meaning |
@@ -185,8 +175,6 @@ To give the same access to an SSO role instead, attach the policy in the `Oncall
 | `VpcCidr` | `10.42.0.0/16` | VPC range, split into three /20 subnets. |
 | `AllowPublicRepos` | `false` | Launch runners for jobs from public repositories. See setup step 5. |
 | `AlertEmail` | empty | Email address subscribed to the `<stack>-alerts` topic. See [Alerts](#alerts) for what it receives. |
-| `OncallUserName` | `oncall` | IAM user given the on-call read policy. Empty creates only the policy. See setup step 7. |
-| `SlackWorkspaceId`, `SlackChannelId` | empty | Slack workspace and channel that receive the alert topic. See setup step 2. |
 
 Pass overrides as `./deploy.sh Key=Value …`.
 
@@ -235,19 +223,14 @@ CACHE=$(aws cloudformation describe-stacks --region "$REGION" --stack-name "$STA
   --query "Stacks[0].Outputs[?OutputKey=='CacheBucket'].OutputValue" --output text)
 aws s3 rm "s3://$CACHE" --recursive --region "$REGION"
 
-# 4. Delete the on-call user's access keys. CloudFormation cannot delete a user that has any.
-for KEY in $(aws iam list-access-keys --user-name oncall --query "AccessKeyMetadata[].AccessKeyId" --output text); do
-  aws iam delete-access-key --user-name oncall --access-key-id "$KEY"
-done
-
-# 5. Delete the stack and wait for it to finish.
+# 4. Delete the stack and wait for it to finish.
 aws cloudformation delete-stack --region "$REGION" --stack-name "$STACK"
 aws cloudformation wait stack-delete-complete --region "$REGION" --stack-name "$STACK"
 
-# 6. Delete the artifact bucket that deploy.sh created for the Lambda code.
+# 5. Delete the artifact bucket that deploy.sh created for the Lambda code.
 aws s3 rb "s3://$STACK-artifacts-$ACCOUNT-$REGION" --force --region "$REGION"
 ```
 
 Then remove the `ec2` labels from workflows, or those jobs will wait for a runner that never comes.
 
-Step 5 removes everything else: the VPC, Lambdas, jobs table, launch template, IAM roles, on-call user and policy, log groups, alarms, alert topic, Slack channel configuration, and the GitHub App secret. Secrets Manager may keep the deleted secret in a recovery window before removing it, during which it is not billed.
+Step 4 removes everything else: the VPC, Lambdas, jobs table, launch template, IAM roles, log groups, alarms, alert topic, and the GitHub App secret. The Slack channel configuration keeps the deleted topic's ARN in its list until it is removed in the Amazon Q Developer in chat applications console. Secrets Manager may keep the deleted secret in a recovery window before removing it, during which it is not billed.
