@@ -323,8 +323,7 @@ Resources:
               - Effect: Allow
                 Action: [dynamodb:Scan, dynamodb:UpdateItem]
                 Resource: !GetAtt JobsTable.Arn
-              # Alerts about failed launches. Lambda also publishes failed
-              # async invocations to the topic with this role.
+              # Alerts about jobs that cannot launch or keep failing to launch.
               - Effect: Allow
                 Action: sns:Publish
                 Resource: !Ref AlertTopic
@@ -385,7 +384,7 @@ Resources:
 
   # Receives alerts: job labels that can never launch, launches that keep
   # failing, jobs whose runners keep going unused, a runner group that admits
-  # public repositories, and reconciler runs that failed after Lambda's retries.
+  # public repositories, and the CloudWatch alarms below.
   AlertTopic:
     Type: AWS::SNS::Topic
     Properties:
@@ -504,9 +503,6 @@ Resources:
       Qualifier: $LATEST
       MaximumRetryAttempts: 2
       MaximumEventAgeInSeconds: 900
-      DestinationConfig:
-        OnFailure:
-          Destination: !Ref AlertTopic
 
   JanitorFunction:
     Type: AWS::Lambda::Function
@@ -557,6 +553,94 @@ Resources:
       Action: lambda:InvokeFunction
       Principal: events.amazonaws.com
       SourceArn: !GetAtt MaintenanceSchedule.Arn
+
+  # ---------- Alarms ----------
+  # Each alarm notifies the alert topic when it fires and when it clears.
+  WebhookErrorsAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub ${AWS::StackName}-webhook-errors
+      AlarmDescription: >-
+        The webhook Lambda failed on a GitHub delivery, so that job was not recorded and GitHub does not retry it. Read /aws/lambda/<stack>-webhook, fix the cause, then redeliver from the GitHub App's Advanced tab.
+      Namespace: AWS/Lambda
+      MetricName: Errors
+      Dimensions: [{ Name: FunctionName, Value: !Ref WebhookFunction }]
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: [!Ref AlertTopic]
+      OKActions: [!Ref AlertTopic]
+
+  ReconcilerErrorsAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub ${AWS::StackName}-reconciler-errors
+      AlarmDescription: >-
+        A reconcile failed before reaching any job, for example on a GitHub API or DynamoDB error. Queued jobs wait for the next successful run. Read /aws/lambda/<stack>-reconciler.
+      Namespace: AWS/Lambda
+      MetricName: Errors
+      Dimensions: [{ Name: FunctionName, Value: !Ref ReconcilerFunction }]
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: [!Ref AlertTopic]
+      OKActions: [!Ref AlertTopic]
+
+  JanitorErrorsAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub ${AWS::StackName}-janitor-errors
+      AlarmDescription: >-
+        The janitor failed, so idle and expired runner instances are not being terminated and keep costing money. Read /aws/lambda/<stack>-janitor.
+      Namespace: AWS/Lambda
+      MetricName: Errors
+      Dimensions: [{ Name: FunctionName, Value: !Ref JanitorFunction }]
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: [!Ref AlertTopic]
+      OKActions: [!Ref AlertTopic]
+
+  # Counts webhook deliveries rejected for a bad signature. Steady rejections
+  # mean the webhook secret in GitHub differs from the one in the app secret.
+  InvalidSignatureMetric:
+    Type: AWS::Logs::MetricFilter
+    Properties:
+      LogGroupName: !Ref WebhookLogs
+      FilterPattern: '{ $.msg = "rejected delivery with invalid signature" }'
+      MetricTransformations:
+        - MetricNamespace: !Sub EC2Runners/${AWS::StackName}
+          MetricName: InvalidSignatures
+          MetricValue: "1"
+          DefaultValue: 0
+
+  InvalidSignatureAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub ${AWS::StackName}-webhook-invalid-signatures
+      AlarmDescription: >-
+        The webhook rejected several deliveries for a bad signature. The webhook
+        secret in the GitHub App's settings likely differs from webhookSecret in
+        the app secret, so no jobs are being recorded.
+      Namespace: !Sub EC2Runners/${AWS::StackName}
+      MetricName: InvalidSignatures
+      Statistic: Sum
+      Period: 900
+      EvaluationPeriods: 1
+      Threshold: 3
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: [!Ref AlertTopic]
+      OKActions: [!Ref AlertTopic]
 
 Outputs:
   WebhookUrl:

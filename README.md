@@ -25,7 +25,11 @@ The `<stack>-alerts` SNS topic receives these alerts:
 - A job that has failed to launch three times, for example for lack of capacity. The reconciler keeps retrying it every 5 minutes.
 - A job whose runners keep going unused. When two runners launched for a job sit idle until the janitor terminates them while the job is still queued, GitHub is not assigning the job to them. Usually the runner group does not allow the job's repository. The reconciler stops launching for that job.
 - The runner group allows public repositories while `AllowPublicRepos` is false. No runners launch until one of the two settings changes.
-- A reconciler run that failed after Lambda's two retries.
+- CloudWatch alarms, both when they fire and when they clear:
+  - `<stack>-webhook-errors`: the webhook failed on a delivery. GitHub does not retry it, so redeliver it from the GitHub App's Advanced tab once the cause is fixed.
+  - `<stack>-webhook-invalid-signatures`: three or more deliveries in 15 minutes failed signature checks, which usually means the webhook secret in GitHub differs from the one in the app secret.
+  - `<stack>-reconciler-errors`: a reconcile failed before reaching any job, for example on a GitHub API error.
+  - `<stack>-janitor-errors`: the janitor failed, so idle instances are not being terminated.
 
 A job that cannot launch stays queued in GitHub until it is cancelled or GitHub's 24-hour queue limit ends it.
 
