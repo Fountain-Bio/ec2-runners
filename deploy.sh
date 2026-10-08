@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Packages the Lambda code and deploys the stack.
+# Bundles the Lambda code and deploys the stack. Needs bun and the AWS CLI.
 #
 #   ./deploy.sh                      # stack "ec2-runners" in the current AWS region
 #   STACK=ci-runners ./deploy.sh GitHubOrg=example-org IdleMinutes=15
@@ -25,7 +25,11 @@ if ! aws s3api head-bucket --bucket "$ARTIFACTS" 2>/dev/null; then
     --public-access-block-configuration BlockPublicAcls=true,IgnorePublicAcls=true,BlockPublicPolicy=true,RestrictPublicBuckets=true
 fi
 
-mkdir -p .build
+# Bundles src/index.ts into .build/lambda/index.mjs, which template.yaml uses
+# as the code for all three functions.
+bun install --frozen-lockfile
+bun run build
+
 aws cloudformation package \
   --region "$REGION" \
   --template-file template.yaml \

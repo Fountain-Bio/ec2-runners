@@ -1,0 +1,25 @@
+{
+  // Typechecks the Lambda source. Bun runs and bundles the .ts files directly,
+  // so tsc only checks types and never writes output.
+  "compilerOptions": {
+    // The Lambdas run on Node.js 24. Only Node's types are loaded here, so code
+    // in src/ cannot call Bun-only APIs that would fail in Lambda.
+    "lib": ["ES2025"],
+    "target": "ES2025",
+    "types": ["node"],
+
+    "module": "Preserve",
+    "moduleResolution": "bundler",
+    "moduleDetection": "force",
+    "allowImportingTsExtensions": true,
+    "verbatimModuleSyntax": true,
+    "noEmit": true,
+
+    "strict": true,
+    "skipLibCheck": true,
+    "noFallthroughCasesInSwitch": true,
+    "noUncheckedIndexedAccess": true,
+    "noImplicitOverride": true
+  },
+  "include": ["src"]
+}

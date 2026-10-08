@@ -4,12 +4,22 @@ Ephemeral GitHub Actions runners on EC2 Spot for the example-org org, deployed a
 
 ## How it works
 
-1. GitHub sends a `workflow_job` webhook to a Lambda function URL (`<stack>-webhook`). The function checks the HMAC signature, keeps only `queued` jobs whose labels include `ec2`, and invokes the launcher asynchronously.
-2. The launcher (`<stack>-launcher`) registers a just-in-time runner named `<stack>-<job id>` with the job's labels, finds the newest matching AMI, and calls EC2 Fleet (`instant`) with attribute-based instance selection, one subnet per call in shuffled order. It tries Spot with `price-capacity-optimized` in each subnet first, then On-Demand.
+1. GitHub sends a `workflow_job` webhook to a Lambda function URL (`<stack>-webhook`). The function checks the HMAC signature and keeps only jobs whose labels include `ec2`. It records each queued job from a private repository in a DynamoDB table (`<stack>-jobs`), marks jobs done when they start or finish, and invokes the reconciler asynchronously.
+2. The reconciler (`<stack>-reconciler`) compares the queued jobs with the runners that could still take them: registered, idle, and either running or still launching. It launches a runner for each job those runners cannot cover. Before launching, it confirms with the GitHub API that the job is still queued, finds the newest matching AMI, and checks that some instance type matches the labels. It then registers a just-in-time runner with the job's labels and calls EC2 Fleet (`instant`) with attribute-based instance selection, one subnet per call in shuffled order, trying Spot with `price-capacity-optimized` in each subnet first, then On-Demand.
 3. The instance boot script runs `run.sh --jitconfig`, executes the job, and powers off. The launch template sets shutdown behavior to `terminate`, so power-off deletes the instance.
-4. The janitor (`<stack>-janitor`, every 5 minutes) terminates instances that have not started a job within `IdleMinutes` or have run longer than `MaxMinutes`, and removes runner registrations whose instance has ended.
+4. The janitor (`<stack>-janitor`, every 5 minutes) terminates instances that have not started a job within `IdleMinutes` or have run longer than `MaxMinutes`, removes runner registrations whose instance has ended or never appeared, and deletes launch template versions left by a reconciler that stopped partway. The same schedule also runs the reconciler, which picks up jobs whose webhook was lost and retries failed launches.
 
-The runner name includes the job ID, so a redelivered webhook gets a 409 from GitHub and launches nothing.
+### Why the reconciler matches jobs to runners
+
+GitHub gives a queued job to any idle runner whose labels include all of the job's labels. It does not know which job a runner was launched for, so a job that asks for `[ec2]` can start on a runner launched for a job that asked for `[ec2, cpu=8]`. The reconciler therefore treats the stack's runners as one pool. On every run it pairs queued jobs with available runners using a maximum bipartite matching, and launches only for the jobs left without a runner. Two jobs that each take the other's runner need no launch. A `cpu=8` job whose runner went to an `[ec2]` job gets a new runner, because the `[ec2]` job's runner does not fit it.
+
+The reconciler runs with a reserved concurrency of 1. Each run therefore sees the runners the previous run registered, and a job never gets two launches. One run launches all uncovered jobs in parallel, so a burst of queued jobs does not wait on a line of separate runs.
+
+Runner names are `<stack>-<job id>-<launch time>`. The job ID shows which job the launch was for, and the launch time lets the janitor remove a registration that never got an instance.
+
+### Alerts
+
+The `<stack>-alerts` SNS topic receives three kinds of alert. One is a job whose labels can never launch, such as `cpu=3` or an unknown image, sent once per job. Another is a job that has failed to launch three times, for example for lack of capacity. The reconciler keeps retrying that job every 5 minutes. The third is a reconciler run that failed after Lambda's two retries. A job that cannot launch stays queued in GitHub until it is cancelled or GitHub's 24-hour queue limit ends it.
 
 The stack creates its own VPC with three public subnets and no NAT gateway. The runner security group has no inbound rules. An S3 gateway endpoint keeps cache traffic on the AWS network.
 
@@ -45,6 +55,8 @@ Any other `key=value` label, such as `run=${{ github.run_id }}`, is copied onto 
 
 Every job also gets these variables, usable in shells and as `${{ env.NAME }}` in workflow expressions: `EC2_RUNNER_CACHE_BUCKET`, `EC2_RUNNER_REGION`, and `EC2_RUNNER_NVME` (`true` when the instance store is in use).
 
+The cache bucket is shared by every repository and branch that uses these runners, and every job can read and write all of it. A job in one repository can therefore replace a cache entry that a build in another repository restores. Treat cached content as trusted only as far as everyone who can push a branch in the org is trusted.
+
 The `full` images are ports of GitHub's hosted runner images, so actions that work on `ubuntu-latest` generally work here. `runs-on/cache` reads the bucket name from `RUNS_ON_S3_BUCKET_CACHE`, which the boot script sets for every job, and authenticates with the instance profile. On GitHub-hosted runners the variable is absent and `runs-on/cache` falls back to GitHub's cache.
 
 ## Docker builds
@@ -53,7 +65,7 @@ Local NVMe disks and the BuildKit layer cache make image builds fast. Neither re
 
 ### Local NVMe disks
 
-When the instance type has instance-store SSDs, the boot script formats them (striped with RAID 0 when there are several), and mounts them over `/var/lib/docker`, `/var/lib/containerd`, the job work directory, and `TMPDIR`. `nvme=true` makes the launcher choose only such instance types. Instance-store disks are much faster than the gp3 root volume and are erased when the instance terminates. Images preloaded in the AMI under `/var/lib/docker` are hidden by the mount, which matters only for jobs that relied on them.
+When the instance type has instance-store SSDs, the boot script formats them (striped with RAID 0 when there are several), and mounts them over `/var/lib/docker`, `/var/lib/containerd`, the job work directory, and `TMPDIR`. `nvme=true` makes the reconciler choose only such instance types. Instance-store disks are much faster than the gp3 root volume and are erased when the instance terminates. Images preloaded in the AMI under `/var/lib/docker` are hidden by the mount, which matters only for jobs that relied on them.
 
 ### BuildKit layer cache in S3
 
@@ -79,15 +91,15 @@ jobs:
 
 ## Setup
 
-Requirements: AWS CLI v2 with admin credentials for the target account, and owner access to the GitHub org.
+Requirements: AWS CLI v2 with admin credentials for the target account, [Bun](https://bun.com), and owner access to the GitHub org.
 
 ### 1. Deploy the stack
 
 ```bash
-AWS_REGION=us-west-2 ./deploy.sh
+AWS_REGION=us-west-2 ./deploy.sh AlertEmail=you@example.com
 ```
 
-The script creates an artifact bucket for the Lambda zip on first run, then packages and deploys. The `runs-on-v2.2-*` AMIs are published in us-east-1, us-east-2, us-west-2, eu-west-1, eu-west-2, eu-west-3, eu-central-1, ap-south-1, ap-northeast-1, ap-southeast-1, and ap-southeast-2. The stack prints `WebhookUrl`, `GitHubAppSecretArn`, and `CacheBucket`.
+The script creates an artifact bucket for the Lambda zip on first run, then bundles the code, packages, and deploys. The `runs-on-v2.2-*` AMIs are published in us-east-1, us-east-2, us-west-2, eu-west-1, eu-west-2, eu-west-3, eu-central-1, ap-south-1, ap-northeast-1, ap-southeast-1, and ap-southeast-2. The stack prints `WebhookUrl`, `GitHubAppSecretArn`, `CacheBucket`, and `AlertTopicArn`. With `AlertEmail` set, SNS emails a subscription confirmation that must be accepted before alerts arrive.
 
 ### 2. Create the GitHub App
 
@@ -116,11 +128,11 @@ aws secretsmanager put-secret-value \
 
 ### 4. Check the runner group
 
-The launcher registers runners in the org's Default runner group (ID 1). If any public repository will use these runners, enable "Allow public repositories" on that group in org settings under Actions, Runner groups. Running untrusted pull-request code from forks on these runners gives that code the instance's cache-bucket access.
+The reconciler registers runners in the org's Default runner group (ID 1). Jobs from public repositories are ignored by default, because pull requests from forks would run untrusted code with write access to the shared cache bucket. To use these runners from public repositories anyway, deploy with `AllowPublicRepos=true` and enable "Allow public repositories" on the runner group in org settings under Actions, Runner groups.
 
 ### 5. Test
 
-Push a workflow with `runs-on: [ec2]`. In the GitHub App's Advanced tab, recent deliveries should show `202` for `queued` events. Logs are in CloudWatch under `/aws/lambda/<stack>-webhook`, `-launcher`, and `-janitor`. The boot log on an instance is `/var/log/ec2-runner-boot.log`, reachable through Session Manager while the instance is alive.
+Push a workflow with `runs-on: [ec2]`. In the GitHub App's Advanced tab, recent deliveries should show `202` for `queued` events and `200` for most other events. Logs are in CloudWatch under `/aws/lambda/<stack>-webhook`, `-reconciler`, and `-janitor`. The boot log on an instance is `/var/log/ec2-runner-boot.log`, reachable through Session Manager while the instance is alive.
 
 ## Parameters
 
@@ -129,29 +141,37 @@ Push a workflow with `runs-on: [ec2]`. In the GitHub App's Advanced tab, recent 
 | `GitHubOrg` | `example-org` | Org the app is installed on. Webhooks from other orgs are ignored. |
 | `TriggerLabel` | `ec2` | Label that opts a job in. |
 | `RunnerGroupId` | `1` | Org runner group for registrations. |
-| `IdleMinutes` | `20` | Kill an instance that has not started a job after this long. Covers cancelled jobs and jobs that another runner took. |
+| `IdleMinutes` | `20` | Kill an instance that has not started a job after this long. Covers runners left over when a job is cancelled. |
 | `MaxMinutes` | `360` | Hard instance lifetime, enforced both by the boot script and the janitor. |
 | `AmiOwner`, `AmiNamePrefix` | RunsOn public images | Where `image=` names are looked up. |
-| `RunnerVersion` | `latest` | actions/runner version to download when the AMI does not have one at `/opt/ec2-runner`. |
+| `RunnerVersion` | `latest` | actions/runner version to download when the AMI does not have one at `/opt/ec2-runner`. The boot script checks the download against the SHA-256 digest GitHub publishes for the release asset. |
 | `CacheRetentionDays` | `10` | Lifecycle expiry on the cache bucket. |
 | `VpcCidr` | `10.42.0.0/16` | VPC range, split into three /20 subnets. |
+| `AllowPublicRepos` | `false` | Launch runners for jobs from public repositories. See setup step 4. |
+| `AlertEmail` | empty | Email address subscribed to the `<stack>-alerts` topic, which receives launches that failed after retries. |
 
 Pass overrides as `./deploy.sh Key=Value …`.
 
 ## Known limits
 
 - A Spot interruption fails the job. GitHub does not retry it automatically. Mark interruption-sensitive jobs `spot=false`.
-- A job that waits in the queue longer than `IdleMinutes` (for example behind a concurrency group) loses its instance and stays queued. Raise `IdleMinutes` if that happens.
+- A job that stays queued longer than `IdleMinutes` while its runner sits idle loses that runner to the janitor, and the next reconcile launches another. Raise `IdleMinutes` if jobs often wait that long.
+- A job cancelled after its runner launched leaves that runner idle until the janitor terminates it after `IdleMinutes`. A queued job with matching labels can use it in the meantime.
 - The boot script downloads the actions runner from GitHub on each boot, which adds a few seconds. Baking it into a custom AMI at `/opt/ec2-runner` skips the download.
 - The default AMIs are built and published by RunsOn. To use your own, build an AMI and set `AmiOwner` and `AmiNamePrefix`, or pass `image=ami-…`.
 - Linux only. Windows and GPU images would need GPU instance requirements and a PowerShell boot script.
 
 ## Development
 
+The code is TypeScript, run directly by [Bun](https://bun.com) in development. GitHub calls and webhook payload types come from Octokit, and Zod parses the environment, the app secret, and the rows read from the jobs table. The Lambdas run on the Node.js 24 runtime, so `deploy.sh` bundles `src/index.ts` and its dependencies, including the AWS SDK clients, into a single `index.mjs` with `bun build`.
+
 ```bash
-npm install          # AWS SDK, for tests only; the Lambda runtime provides it
-npm test
-npm run lint:template   # needs cfn-lint
+bun install
+bun test
+bun run test:integration # jobs table against DynamoDB Local; needs Docker
+bun run typecheck        # tsc, for src/ (Node types only) and test/ (Bun types)
+bun run build            # writes .build/lambda/index.mjs; deploy.sh runs this
+bun run lint:template    # needs cfn-lint
 ```
 
 ## Removing it
@@ -187,4 +207,4 @@ aws s3 rb "s3://$STACK-artifacts-$ACCOUNT-$REGION" --force --region "$REGION"
 
 Then remove the `ec2` labels from workflows, or those jobs will wait for a runner that never comes.
 
-Step 4 removes everything else: the VPC, Lambdas, launch template, IAM roles, log groups, and the GitHub App secret. Secrets Manager may keep the deleted secret in a recovery window before removing it, during which it is not billed.
+Step 4 removes everything else: the VPC, Lambdas, jobs table, launch template, IAM roles, log groups, alert topic, and the GitHub App secret. Secrets Manager may keep the deleted secret in a recovery window before removing it, during which it is not billed.

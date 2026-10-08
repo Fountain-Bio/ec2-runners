@@ -1,0 +1,8 @@
+{
+  // Tests run under Bun's test runner, so they also get Bun's types.
+  "extends": "../tsconfig.json",
+  "compilerOptions": {
+    "types": ["bun"]
+  },
+  "include": [".", "../src"]
+}

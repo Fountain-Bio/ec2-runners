@@ -4,12 +4,30 @@
   "type": "module",
   "description": "Ephemeral GitHub Actions runners on EC2 Spot, deployed as one CloudFormation stack.",
   "scripts": {
-    "test": "node --test test/*.test.mjs",
+    "test": "bun test",
+    "test:integration": "bun test ./test/integration/jobs.integration.ts",
+    "typecheck": "tsc --noEmit && tsc --noEmit -p test",
+    "build": "bun build src/index.ts --target=node --format=esm --minify-whitespace --minify-syntax --outfile .build/lambda/index.mjs",
     "lint:template": "cfn-lint template.yaml --ignore-checks W3002"
   },
   "devDependencies": {
-    "@aws-sdk/client-ec2": "^3.0.0",
-    "@aws-sdk/client-lambda": "^3.0.0",
-    "@aws-sdk/client-secrets-manager": "^3.0.0"
+    "@octokit/openapi-webhooks-types": "12.2.0",
+    "@types/aws-lambda": "8.10.164",
+    "@types/bun": "1.4.2",
+    "@types/node": "24.19.1",
+    "typescript": "7.0.2"
+  },
+  "dependencies": {
+    "@aws-sdk/client-dynamodb": "3.1147.0",
+    "@aws-sdk/client-ec2": "3.1147.0",
+    "@aws-sdk/client-lambda": "3.1147.0",
+    "@aws-sdk/client-secrets-manager": "3.1147.0",
+    "@aws-sdk/client-sns": "3.1147.0",
+    "@aws-sdk/lib-dynamodb": "3.1147.0",
+    "@octokit/auth-app": "8.3.1",
+    "@octokit/request-error": "7.1.2",
+    "@octokit/rest": "22.0.1",
+    "@octokit/webhooks-methods": "6.0.0",
+    "zod": "4.6.5"
   }
 }

@@ -2,11 +2,24 @@
 // just-in-time runner, runs exactly one job, and powers off. The launch
 // template sets shutdown behavior to "terminate", so powering off deletes it.
 
-function shellQuote(value) {
-  return `'${String(value).replace(/'/g, `'\\''`)}'`;
+export interface UserDataOptions {
+  // Base64 JIT runner config from GitHub's generate-jitconfig endpoint.
+  jitConfig: string;
+  cacheBucket: string;
+  region: string;
+  // Hard instance lifetime. The script schedules a shutdown after this long.
+  maxMinutes: number;
+  // actions/runner tarball to install when the AMI has none at /opt/ec2-runner.
+  // The script refuses a download whose SHA-256 differs from runner.sha256.
+  runner: { url: string; sha256: string };
 }
 
-export function buildUserData({ jitConfig, cacheBucket, region, maxMinutes, runnerVersion = "latest" }) {
+function shellQuote(value: string): string {
+  return `'${value.replace(/'/g, `'\\''`)}'`;
+}
+
+// Returns the script base64-encoded, as EC2 launch template user data expects.
+export function buildUserData({ jitConfig, cacheBucket, region, maxMinutes, runner }: UserDataOptions): string {
   const script = `#!/bin/bash
 set -euo pipefail
 exec > >(tee -a /var/log/ec2-runner-boot.log) 2>&1
@@ -17,7 +30,8 @@ shutdown -h +${Number(maxMinutes)} "ec2-runners max lifetime reached" || true
 JIT_CONFIG=${shellQuote(jitConfig)}
 CACHE_BUCKET=${shellQuote(cacheBucket)}
 REGION=${shellQuote(region)}
-RUNNER_VERSION=${shellQuote(runnerVersion)}
+RUNNER_URL=${shellQuote(runner.url)}
+RUNNER_SHA256=${shellQuote(runner.sha256)}
 RUNNER_DIR=/opt/ec2-runner
 HOOK_DIR=/opt/ec2-runner-hooks
 
@@ -71,19 +85,14 @@ if ! id runner >/dev/null 2>&1; then
 fi
 getent group docker >/dev/null && usermod -aG docker runner
 
+# The reconciler picked the tarball for the AMI's architecture. sha256sum -c
+# fails on a mismatch, and set -e then powers the instance off.
 if [ ! -x "$RUNNER_DIR/run.sh" ]; then
-  case "$(uname -m)" in
-    x86_64) ARCH=x64 ;;
-    aarch64) ARCH=arm64 ;;
-    *) echo "unsupported architecture $(uname -m)"; exit 1 ;;
-  esac
-  if [ "$RUNNER_VERSION" = "latest" ]; then
-    RUNNER_VERSION=$(curl -fsSI https://github.com/actions/runner/releases/latest \\
-      | tr -d '\\r' | awk -F/ 'tolower($1) ~ /^location:/ {print $NF}' | sed 's/^v//')
-  fi
   mkdir -p "$RUNNER_DIR"
-  curl -fsSL "https://github.com/actions/runner/releases/download/v\${RUNNER_VERSION}/actions-runner-linux-\${ARCH}-\${RUNNER_VERSION}.tar.gz" \\
-    | tar -xz -C "$RUNNER_DIR"
+  curl -fsSL -o /tmp/actions-runner.tar.gz "$RUNNER_URL"
+  echo "$RUNNER_SHA256  /tmp/actions-runner.tar.gz" | sha256sum -c -
+  tar -xzf /tmp/actions-runner.tar.gz -C "$RUNNER_DIR"
+  rm -f /tmp/actions-runner.tar.gz
 fi
 
 if [ "$NVME" = true ]; then

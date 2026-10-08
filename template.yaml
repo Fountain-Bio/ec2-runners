@@ -47,6 +47,21 @@ Parameters:
     Type: String
     Description: CIDR block for the runner VPC. Split into three public /20 subnets.
     Default: 10.42.0.0/16
+  AllowPublicRepos:
+    Type: String
+    Description: >-
+      Launch runners for jobs from public repositories. Fork pull requests in a
+      public repository could then write to the cache bucket that every
+      repository's jobs read.
+    Default: "false"
+    AllowedValues: ["true", "false"]
+  AlertEmail:
+    Type: String
+    Description: Email address subscribed to launch alerts. Leave empty to subscribe later.
+    Default: ""
+
+Conditions:
+  HasAlertEmail: !Not [!Equals [!Ref AlertEmail, ""]]
 
 Resources:
   # ---------- Network: public subnets, no NAT, no inbound access ----------
@@ -190,7 +205,7 @@ Resources:
     Properties:
       Roles: [!Ref RunnerRole]
 
-  # Base settings for every runner. The launcher adds a version per launch
+  # Base settings for every runner. The reconciler adds a version per launch
   # carrying the AMI, disk size, tags, and user data.
   RunnerLaunchTemplate:
     Type: AWS::EC2::LaunchTemplate
@@ -214,7 +229,10 @@ Resources:
       Description: GitHub App credentials. Set appId, privateKey (PEM), and webhookSecret after deploying.
       SecretString: '{"appId":"REPLACE_ME","privateKey":"REPLACE_ME","webhookSecret":"REPLACE_ME"}'
 
-  ControlPlaneRole:
+  # Each function has its own role with only the permissions it uses. The
+  # webhook is reachable from the internet, so it can only read the secret,
+  # record jobs, send alerts, and invoke the reconciler.
+  WebhookRole:
     Type: AWS::IAM::Role
     Properties:
       AssumeRolePolicyDocument:
@@ -226,7 +244,7 @@ Resources:
       ManagedPolicyArns:
         - !Sub arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
       Policies:
-        - PolicyName: control-plane
+        - PolicyName: webhook
           PolicyDocument:
             Version: "2012-10-17"
             Statement:
@@ -235,7 +253,34 @@ Resources:
                 Resource: !Ref GitHubAppSecret
               - Effect: Allow
                 Action: lambda:InvokeFunction
-                Resource: !Sub arn:${AWS::Partition}:lambda:${AWS::Region}:${AWS::AccountId}:function:${AWS::StackName}-launcher
+                Resource: !Sub arn:${AWS::Partition}:lambda:${AWS::Region}:${AWS::AccountId}:function:${AWS::StackName}-reconciler
+              - Effect: Allow
+                Action: [dynamodb:PutItem, dynamodb:UpdateItem]
+                Resource: !GetAtt JobsTable.Arn
+              # Alerts about job labels that can never launch.
+              - Effect: Allow
+                Action: sns:Publish
+                Resource: !Ref AlertTopic
+
+  ReconcilerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: lambda.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Sub arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: reconciler
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: secretsmanager:GetSecretValue
+                Resource: !Ref GitHubAppSecret
               - Effect: Allow
                 Action: [ec2:CreateLaunchTemplateVersion, ec2:DeleteLaunchTemplateVersions]
                 Resource: !Sub arn:${AWS::Partition}:ec2:${AWS::Region}:${AWS::AccountId}:launch-template/${RunnerLaunchTemplate}
@@ -243,7 +288,6 @@ Resources:
                 Action:
                   - ec2:CreateFleet
                   - ec2:RunInstances
-                  - ec2:CreateTags
                   - ec2:DescribeImages
                   - ec2:DescribeInstances
                   - ec2:DescribeInstanceTypes
@@ -252,12 +296,15 @@ Resources:
                   - ec2:DescribeSubnets
                   - ec2:GetInstanceTypesFromInstanceRequirements
                 Resource: "*"
+              # Tags may only be applied while launching. Without this
+              # condition the role could add the stack tag to any instance and
+              # then terminate it under the janitor's tag-scoped permission.
               - Effect: Allow
-                Action: ec2:TerminateInstances
+                Action: ec2:CreateTags
                 Resource: "*"
                 Condition:
                   StringEquals:
-                    aws:ResourceTag/ec2-runners:stack: !Ref AWS::StackName
+                    ec2:CreateAction: [CreateFleet, RunInstances]
               - Effect: Allow
                 Action: iam:PassRole
                 Resource: !GetAtt RunnerRole.Arn
@@ -267,16 +314,89 @@ Resources:
                 Condition:
                   StringEquals:
                     iam:AWSServiceName: [spot.amazonaws.com, ec2fleet.amazonaws.com]
+              - Effect: Allow
+                Action: [dynamodb:Scan, dynamodb:UpdateItem]
+                Resource: !GetAtt JobsTable.Arn
+              # Alerts about failed launches. Lambda also publishes failed
+              # async invocations to the topic with this role.
+              - Effect: Allow
+                Action: sns:Publish
+                Resource: !Ref AlertTopic
+
+  JanitorRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: lambda.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Sub arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: janitor
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: secretsmanager:GetSecretValue
+                Resource: !Ref GitHubAppSecret
+              - Effect: Allow
+                Action: [ec2:DescribeInstances, ec2:DescribeLaunchTemplateVersions]
+                Resource: "*"
+              - Effect: Allow
+                Action: ec2:DeleteLaunchTemplateVersions
+                Resource: !Sub arn:${AWS::Partition}:ec2:${AWS::Region}:${AWS::AccountId}:launch-template/${RunnerLaunchTemplate}
+              - Effect: Allow
+                Action: ec2:TerminateInstances
+                Resource: "*"
+                Condition:
+                  StringEquals:
+                    aws:ResourceTag/ec2-runners:stack: !Ref AWS::StackName
+
+  # Receives alerts: job labels that can never launch, launches that keep
+  # failing, and reconciler invocations that failed after Lambda's retries.
+  # Jobs that asked for an EC2 runner, keyed by GitHub job ID. The webhook
+  # writes them and the reconciler reads the queued ones. Rows expire after a
+  # day through the expiresAt TTL attribute.
+  JobsTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    Properties:
+      TableName: !Sub ${AWS::StackName}-jobs
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - { AttributeName: jobId, AttributeType: N }
+      KeySchema:
+        - { AttributeName: jobId, KeyType: HASH }
+      TimeToLiveSpecification:
+        AttributeName: expiresAt
+        Enabled: true
+
+  AlertTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub ${AWS::StackName}-alerts
+
+  AlertSubscription:
+    Type: AWS::SNS::Subscription
+    Condition: HasAlertEmail
+    Properties:
+      TopicArn: !Ref AlertTopic
+      Protocol: email
+      Endpoint: !Ref AlertEmail
 
   WebhookLogs:
     Type: AWS::Logs::LogGroup
     Properties:
       LogGroupName: !Sub /aws/lambda/${AWS::StackName}-webhook
       RetentionInDays: 14
-  LauncherLogs:
+  ReconcilerLogs:
     Type: AWS::Logs::LogGroup
     Properties:
-      LogGroupName: !Sub /aws/lambda/${AWS::StackName}-launcher
+      LogGroupName: !Sub /aws/lambda/${AWS::StackName}-reconciler
       RetentionInDays: 14
   JanitorLogs:
     Type: AWS::Logs::LogGroup
@@ -292,8 +412,8 @@ Resources:
       Runtime: nodejs24.x
       Architectures: [arm64]
       Handler: index.webhook
-      Code: ./src
-      Role: !GetAtt ControlPlaneRole.Arn
+      Code: ./.build/lambda
+      Role: !GetAtt WebhookRole.Arn
       Timeout: 10
       MemorySize: 256
       Environment:
@@ -303,7 +423,9 @@ Resources:
           TRIGGER_LABEL: !Ref TriggerLabel
           RUNNER_GROUP_ID: !Ref RunnerGroupId
           RUNNER_PREFIX: !Ref AWS::StackName
-          LAUNCHER_FUNCTION: !Sub ${AWS::StackName}-launcher
+          RECONCILER_FUNCTION: !Sub ${AWS::StackName}-reconciler
+          JOBS_TABLE: !Ref JobsTable
+          ALERT_TOPIC_ARN: !Ref AlertTopic
           LAUNCH_TEMPLATE_ID: !Ref RunnerLaunchTemplate
           LAUNCH_TEMPLATE_VERSION: !GetAtt RunnerLaunchTemplate.DefaultVersionNumber
           SUBNET_IDS: !Join [",", [!Ref SubnetA, !Ref SubnetB, !Ref SubnetC]]
@@ -313,6 +435,7 @@ Resources:
           AMI_OWNER: !Ref AmiOwner
           AMI_NAME_PREFIX: !Ref AmiNamePrefix
           RUNNER_VERSION: !Ref RunnerVersion
+          ALLOW_PUBLIC_REPOS: !Ref AllowPublicRepos
 
   WebhookUrl:
     Type: AWS::Lambda::Url
@@ -337,17 +460,22 @@ Resources:
       Principal: "*"
       InvokedViaFunctionUrl: true
 
-  LauncherFunction:
+  ReconcilerFunction:
     Type: AWS::Lambda::Function
-    DependsOn: LauncherLogs
+    DependsOn: ReconcilerLogs
     Properties:
-      FunctionName: !Sub ${AWS::StackName}-launcher
+      FunctionName: !Sub ${AWS::StackName}-reconciler
       Runtime: nodejs24.x
       Architectures: [arm64]
-      Handler: index.launcher
-      Code: ./src
-      Role: !GetAtt ControlPlaneRole.Arn
-      Timeout: 60
+      Handler: index.reconciler
+      Code: ./.build/lambda
+      Role: !GetAtt ReconcilerRole.Arn
+      # A reconcile launches several jobs in parallel, each with up to six EC2
+      # Fleet calls (Spot, then On-Demand, in three subnets).
+      Timeout: 300
+      # One reconcile at a time, so each sees the runners the previous one
+      # registered and no job gets two launches.
+      ReservedConcurrentExecutions: 1
       MemorySize: 256
       Environment:
         Variables:
@@ -356,7 +484,9 @@ Resources:
           TRIGGER_LABEL: !Ref TriggerLabel
           RUNNER_GROUP_ID: !Ref RunnerGroupId
           RUNNER_PREFIX: !Ref AWS::StackName
-          LAUNCHER_FUNCTION: !Sub ${AWS::StackName}-launcher
+          RECONCILER_FUNCTION: !Sub ${AWS::StackName}-reconciler
+          JOBS_TABLE: !Ref JobsTable
+          ALERT_TOPIC_ARN: !Ref AlertTopic
           LAUNCH_TEMPLATE_ID: !Ref RunnerLaunchTemplate
           LAUNCH_TEMPLATE_VERSION: !GetAtt RunnerLaunchTemplate.DefaultVersionNumber
           SUBNET_IDS: !Join [",", [!Ref SubnetA, !Ref SubnetB, !Ref SubnetC]]
@@ -366,14 +496,18 @@ Resources:
           AMI_OWNER: !Ref AmiOwner
           AMI_NAME_PREFIX: !Ref AmiNamePrefix
           RUNNER_VERSION: !Ref RunnerVersion
+          ALLOW_PUBLIC_REPOS: !Ref AllowPublicRepos
 
-  LauncherAsyncConfig:
+  ReconcilerAsyncConfig:
     Type: AWS::Lambda::EventInvokeConfig
     Properties:
-      FunctionName: !Ref LauncherFunction
+      FunctionName: !Ref ReconcilerFunction
       Qualifier: $LATEST
       MaximumRetryAttempts: 2
       MaximumEventAgeInSeconds: 900
+      DestinationConfig:
+        OnFailure:
+          Destination: !Ref AlertTopic
 
   JanitorFunction:
     Type: AWS::Lambda::Function
@@ -383,8 +517,8 @@ Resources:
       Runtime: nodejs24.x
       Architectures: [arm64]
       Handler: index.janitor
-      Code: ./src
-      Role: !GetAtt ControlPlaneRole.Arn
+      Code: ./.build/lambda
+      Role: !GetAtt JanitorRole.Arn
       Timeout: 120
       MemorySize: 256
       Environment:
@@ -394,7 +528,9 @@ Resources:
           TRIGGER_LABEL: !Ref TriggerLabel
           RUNNER_GROUP_ID: !Ref RunnerGroupId
           RUNNER_PREFIX: !Ref AWS::StackName
-          LAUNCHER_FUNCTION: !Sub ${AWS::StackName}-launcher
+          RECONCILER_FUNCTION: !Sub ${AWS::StackName}-reconciler
+          JOBS_TABLE: !Ref JobsTable
+          ALERT_TOPIC_ARN: !Ref AlertTopic
           LAUNCH_TEMPLATE_ID: !Ref RunnerLaunchTemplate
           LAUNCH_TEMPLATE_VERSION: !GetAtt RunnerLaunchTemplate.DefaultVersionNumber
           SUBNET_IDS: !Join [",", [!Ref SubnetA, !Ref SubnetB, !Ref SubnetC]]
@@ -404,8 +540,9 @@ Resources:
           AMI_OWNER: !Ref AmiOwner
           AMI_NAME_PREFIX: !Ref AmiNamePrefix
           RUNNER_VERSION: !Ref RunnerVersion
+          ALLOW_PUBLIC_REPOS: !Ref AllowPublicRepos
 
-  JanitorSchedule:
+  MaintenanceSchedule:
     Type: AWS::Events::Rule
     Properties:
       ScheduleExpression: rate(5 minutes)
@@ -413,14 +550,25 @@ Resources:
       Targets:
         - Id: janitor
           Arn: !GetAtt JanitorFunction.Arn
+        # Catches jobs whose webhook was lost and retries failed launches.
+        - Id: reconciler
+          Arn: !GetAtt ReconcilerFunction.Arn
 
-  JanitorSchedulePermission:
+  MaintenanceSchedulePermission:
     Type: AWS::Lambda::Permission
     Properties:
       FunctionName: !Ref JanitorFunction
       Action: lambda:InvokeFunction
       Principal: events.amazonaws.com
-      SourceArn: !GetAtt JanitorSchedule.Arn
+      SourceArn: !GetAtt MaintenanceSchedule.Arn
+
+  ReconcilerSchedulePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref ReconcilerFunction
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt MaintenanceSchedule.Arn
 
 Outputs:
   WebhookUrl:
@@ -432,3 +580,6 @@ Outputs:
   CacheBucket:
     Description: S3 bucket used by runs-on/cache and the BuildKit layer cache.
     Value: !Ref CacheBucket
+  AlertTopicArn:
+    Description: SNS topic for alerts about jobs that cannot launch or keep failing to launch.
+    Value: !Ref AlertTopic
