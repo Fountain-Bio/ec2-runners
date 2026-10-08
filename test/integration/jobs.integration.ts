@@ -1,14 +1,15 @@
-// Runs JobStore against DynamoDB Local in Docker, so the conditional writes,
-// the strongly consistent scan, and the ADD counter are checked against the
-// real DynamoDB engine. Needs Docker. Run with `bun run test:integration`.
+// Runs JobStore and ReconcileLock against DynamoDB Local in Docker, so the
+// conditional writes, the strongly consistent scan, and the ADD counter are
+// checked against the real DynamoDB engine. Needs Docker. Run with `bun run test:integration`.
 //
 // The file name lacks ".test", so plain `bun test` skips it.
 
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { execFileSync } from "node:child_process";
 import { CreateTableCommand, DynamoDBClient, ListTablesCommand } from "@aws-sdk/client-dynamodb";
-import { DynamoDBDocumentClient, GetCommand } from "@aws-sdk/lib-dynamodb";
+import { DynamoDBDocumentClient, GetCommand, PutCommand } from "@aws-sdk/lib-dynamodb";
 import { JobStore } from "../../src/jobs.ts";
+import { ReconcileLock } from "../../src/lock.ts";
 
 const IMAGE = "amazon/dynamodb-local:3.3.1";
 const TABLE = "ec2-runners-jobs";
@@ -135,4 +136,88 @@ test("listQueued reads every page of the table", async () => {
   }
   const ids = await queuedIds();
   expect(ids.filter((id) => id >= 1000)).toHaveLength(600);
+});
+
+// ---- ReconcileLock ----
+
+const lock = () => new ReconcileLock(client, TABLE);
+const lockItem = () => row(0);
+const hold = (ms = 60_000) => Date.now() + ms;
+
+test("an uncontended reconcile runs one pass and releases the lock", async () => {
+  let passes = 0;
+  const result = await lock().runExclusive({ holder: "a", holdUntil: hold(), pass: async () => ++passes, canRunAgain: () => true });
+  expect(result).toBe(1);
+  expect(passes).toBe(1);
+  expect((await lockItem())?.lockedBy).toBeUndefined();
+});
+
+test("a reconcile requested during a pass gets another pass from the holder", async () => {
+  let passes = 0;
+  let finishFirstPass!: () => void;
+  const firstPassBlocked = new Promise<void>((resolve) => (finishFirstPass = resolve));
+  let firstPassStarted!: () => void;
+  const started = new Promise<void>((resolve) => (firstPassStarted = resolve));
+
+  const holder = lock().runExclusive({
+    holder: "a",
+    holdUntil: hold(),
+    pass: async () => {
+      passes++;
+      if (passes === 1) {
+        firstPassStarted();
+        await firstPassBlocked;
+      }
+      return passes;
+    },
+    canRunAgain: () => true,
+  });
+  await started;
+  const waiter = await lock().runExclusive({ holder: "b", holdUntil: hold(), pass: async () => -1, canRunAgain: () => true });
+  expect(waiter).toBeUndefined();
+
+  finishFirstPass();
+  expect(await holder).toBe(2);
+  expect((await lockItem())?.lockedBy).toBeUndefined();
+});
+
+test("a failed pass releases the lock", async () => {
+  await expect(
+    lock().runExclusive({ holder: "a", holdUntil: hold(), pass: async () => Promise.reject(new Error("GitHub 502")), canRunAgain: () => true }),
+  ).rejects.toThrow("GitHub 502");
+  expect(await lock().runExclusive({ holder: "b", holdUntil: hold(), pass: async () => "ran", canRunAgain: () => true })).toBe("ran");
+});
+
+test("a lapsed hold from a crashed holder is taken over", async () => {
+  const doc = DynamoDBDocumentClient.from(client);
+  await doc.send(new PutCommand({ TableName: TABLE, Item: { jobId: 0, lockedBy: "crashed", lockUntil: Date.now() - 1000, rerun: false } }));
+  expect(await lock().runExclusive({ holder: "b", holdUntil: hold(), pass: async () => "ran", canRunAgain: () => true })).toBe("ran");
+});
+
+test("a holder out of time releases without the extra pass", async () => {
+  let passes = 0;
+  let finishFirstPass!: () => void;
+  const firstPassBlocked = new Promise<void>((resolve) => (finishFirstPass = resolve));
+  let firstPassStarted!: () => void;
+  const started = new Promise<void>((resolve) => (firstPassStarted = resolve));
+  const holder = lock().runExclusive({
+    holder: "a",
+    holdUntil: hold(),
+    pass: async () => {
+      passes++;
+      firstPassStarted();
+      await firstPassBlocked;
+      return passes;
+    },
+    canRunAgain: () => false,
+  });
+  await started;
+  expect(await lock().runExclusive({ holder: "b", holdUntil: hold(), pass: async () => -1, canRunAgain: () => true })).toBeUndefined();
+  finishFirstPass();
+  expect(await holder).toBe(1);
+  expect((await lockItem())?.lockedBy).toBeUndefined();
+});
+
+test("the lock item is never listed as a queued job", async () => {
+  expect((await store.listQueued()).map((j) => j.jobId)).not.toContain(0);
 });

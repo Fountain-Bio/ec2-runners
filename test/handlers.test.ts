@@ -7,6 +7,7 @@ import { SecretsManagerClient } from "@aws-sdk/client-secrets-manager";
 import { SNSClient } from "@aws-sdk/client-sns";
 import { DynamoDBDocumentClient } from "@aws-sdk/lib-dynamodb";
 import type { LambdaFunctionURLEvent } from "aws-lambda";
+import { ReconcileLock } from "../src/lock.ts";
 import { runnerName } from "../src/pool.ts";
 
 const { privateKey } = generateKeyPairSync("rsa", {
@@ -204,7 +205,15 @@ function ec2With({ instances = [] as object[], instanceTypes = ["c7a.xlarge"], f
 const queuedRow = (jobId: number, labels: string[], { repo = "example-org/app", idleRunners = 0 } = {}) =>
   table.set(jobId, { jobId, repo, runId: 777, labels, status: "queued", launchFailures: 0, idleRunners });
 
-const { webhook, reconciler, janitor } = await import("../src/index.ts");
+// The lock's DynamoDB behavior is covered by test/integration. Here every
+// reconcile takes the lock and runs one pass.
+Object.assign(ReconcileLock.prototype, {
+  runExclusive: async ({ pass }: { pass: () => Promise<unknown> }) => pass(),
+});
+
+const { webhook, reconciler: reconcilerHandler, janitor } = await import("../src/index.ts");
+// The stubbed lock always runs the pass, so the handler always returns its result.
+const reconciler = async (...args: Parameters<typeof reconcilerHandler>) => (await reconcilerHandler(...args))!;
 
 beforeEach(() => {
   awsCalls = [];

@@ -1,9 +1,12 @@
 // Launches runners for queued jobs that the available runners cannot cover.
 //
 // Invoked asynchronously by the webhook and every 5 minutes by a schedule.
-// The function's reserved concurrency is 1, so reconciles never overlap and
-// each one sees the runners the previous one registered.
+// Invocations can run at the same time, so each pass runs under the
+// ReconcileLock (lock.ts): passes never overlap, and each one sees the runners
+// the previous one registered.
 
+import { randomUUID } from "node:crypto";
+import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import { EC2Client } from "@aws-sdk/client-ec2";
 import type { Context } from "aws-lambda";
 import { alert } from "./alerts.ts";
@@ -19,6 +22,7 @@ import {
 import { isGitHubError, type GitHubClient, type RunnerDownload } from "./github.ts";
 import { jobStore, type JobStore, type QueuedJob } from "./jobs.ts";
 import { JobConfigError, parseLabels } from "./labels.ts";
+import { ReconcileLock } from "./lock.ts";
 import { errorMessage, log } from "./log.ts";
 import { LAUNCH_GRACE_MS, availableRunners, runnerName, unmatchedJobs } from "./pool.ts";
 import { buildUserData } from "./userdata.ts";
@@ -35,21 +39,43 @@ const MAX_IDLE_RUNNERS = 2;
 // reconciler starts no launch with less than this much time left before its
 // Lambda timeout, so a timeout never cuts a launch off partway.
 const LAUNCH_TIME_BUDGET_MS = 2 * 60_000;
+// The lock outlasts the holder's Lambda timeout by this much, so a holder that
+// crashes blocks other reconciles only briefly. Without a Lambda context, as in
+// tests, the hold lasts the reconciler's 5 minute timeout.
+const LOCK_MARGIN_MS = 30_000;
+const DEFAULT_HOLD_MS = 5 * 60_000;
 // How long the reconciler caches the runner group's public-repository
 // setting and the runner tarball lookup.
 const CACHE_MS = 60 * 60_000;
 
 const ec2 = new EC2Client({});
+let cachedLock: ReconcileLock | undefined;
 
 type LaunchOutcome = "launched" | "already started" | "gone" | "failed" | "will retry" | "error" | "deferred";
 
 // The schedule passes an EventBridge event and the webhook passes none; the
 // reconciler reads neither. The context is absent in tests.
-export async function reconciler(
-  _event?: unknown,
-  context?: Pick<Context, "getRemainingTimeInMillis">,
-): Promise<{ queued: number; available: number; outcomes: Record<string, LaunchOutcome> }> {
+type PassResult = { queued: number; available: number; outcomes: Record<string, LaunchOutcome> };
+
+// Returns undefined when another invocation is reconciling; that invocation
+// runs another pass for this one.
+export async function reconciler(_event?: unknown, context?: Pick<Context, "getRemainingTimeInMillis">): Promise<PassResult | undefined> {
   const config = reconcilerConfig();
+  const lock = (cachedLock ??= new ReconcileLock(new DynamoDBClient({}), config.JOBS_TABLE));
+  const remaining = () => context?.getRemainingTimeInMillis() ?? DEFAULT_HOLD_MS;
+  const result = await lock.runExclusive({
+    holder: randomUUID(),
+    holdUntil: Date.now() + remaining() + LOCK_MARGIN_MS,
+    pass: () => reconcilePass(config, context),
+    canRunAgain: () => remaining() > LAUNCH_TIME_BUDGET_MS,
+  });
+  if (!result) log("another reconcile holds the lock; it will run a pass for this request");
+  return result;
+}
+
+// One look at the queue: launches a runner for each queued job that the
+// available runners cannot cover.
+async function reconcilePass(config: ReconcilerConfig, context?: Pick<Context, "getRemainingTimeInMillis">): Promise<PassResult> {
   const jobs = jobStore(config.JOBS_TABLE);
   const now = Date.now();
   const gh = await github(config);

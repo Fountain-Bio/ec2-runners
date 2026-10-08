@@ -486,10 +486,9 @@ Resources:
       Role: !GetAtt ReconcilerRole.Arn
       # A reconcile launches several jobs in parallel, each with up to six EC2
       # Fleet calls (Spot, then On-Demand, in three subnets).
+      # Reconciles that overlap wait on a lock item in the jobs table
+      # (src/lock.ts), which lapses 30 seconds past this timeout.
       Timeout: 300
-      # One reconcile at a time, so each sees the runners the previous one
-      # registered and no job gets two launches.
-      ReservedConcurrentExecutions: 1
       MemorySize: 256
       Environment:
         Variables:
