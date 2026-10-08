@@ -55,7 +55,7 @@ export async function webhook(event: LambdaFunctionURLEvent): Promise<APIGateway
         return { statusCode: 200, body: "ignored: public repository" };
       }
       try {
-        parseLabels(job.labels, config.TRIGGER_LABEL);
+        parseLabels(job.labels);
       } catch (err) {
         if (!(err instanceof JobConfigError)) throw err;
         log("invalid job labels", { jobId: job.id, labels: job.labels, error: err.message });

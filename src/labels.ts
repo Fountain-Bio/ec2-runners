@@ -30,7 +30,7 @@ export class JobConfigError extends Error {
   override name = "JobConfigError";
 }
 
-export const DEFAULTS = Object.freeze({
+const DEFAULTS = Object.freeze({
   cpu: 2,
   image: "ubuntu24-full-x64",
   disk: 40,
@@ -44,19 +44,19 @@ const INT_KEYS = ["cpu", "ram", "disk"] as const;
 type IntKey = (typeof INT_KEYS)[number];
 const isIntKey = (key: string): key is IntKey => (INT_KEYS as readonly string[]).includes(key);
 
-function labelParts(labels: readonly unknown[]): string[] {
-  return labels.flatMap((l) => String(l).split("/")).map((p) => p.trim()).filter(Boolean);
+function labelParts(labels: readonly string[]): string[] {
+  return labels.flatMap((l) => l.split("/")).map((p) => p.trim()).filter(Boolean);
 }
 
 // Whether a job opted in. GitHub matches labels case-insensitively.
-export function hasTriggerLabel(labels: readonly unknown[], triggerLabel = "ec2"): boolean {
+export function hasTriggerLabel(labels: readonly string[], triggerLabel = "ec2"): boolean {
   return labelParts(labels).some((p) => p.toLowerCase() === triggerLabel.toLowerCase());
 }
 
-// Returns null for a job without the trigger label. Throws JobConfigError for
-// a label value that cannot be satisfied.
-export function parseLabels(labels: readonly unknown[], triggerLabel = "ec2"): LaunchSpec | null {
-  if (!hasTriggerLabel(labels, triggerLabel)) return null;
+// Reads the settings from an opted-in job's labels. Callers check
+// hasTriggerLabel first. Throws JobConfigError for a label value that cannot
+// be satisfied.
+export function parseLabels(labels: readonly string[]): LaunchSpec {
   const parts = labelParts(labels);
 
   const spec: Omit<LaunchSpec, "ram"> & { ram?: number } = { ...DEFAULTS, families: [] };

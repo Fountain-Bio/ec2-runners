@@ -4,7 +4,7 @@ import { execFileSync } from "node:child_process";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { JobConfigError, instanceRequirements, parseLabels, type LaunchSpec } from "../src/labels.ts";
+import { JobConfigError, hasTriggerLabel, instanceRequirements, parseLabels, type LaunchSpec } from "../src/labels.ts";
 import { verifySignature } from "../src/github.ts";
 import { availableRunners, canRun, classifyRunners, parseRunnerName, runnerName, unmatchedJobs } from "../src/pool.ts";
 import { buildUserData } from "../src/userdata.ts";
@@ -19,34 +19,24 @@ import {
   type LaunchOptions,
 } from "../src/ec2.ts";
 
-// parseLabels returns null without the trigger label; these tests always pass it.
-function spec(labels: string[], triggerLabel?: string): LaunchSpec {
-  const parsed = parseLabels(labels, triggerLabel);
-  if (!parsed) throw new Error(`no trigger label in ${labels.join(", ")}`);
-  return parsed;
-}
-
-test("parseLabels returns null without the trigger label", () => {
-  expect(parseLabels(["ubuntu-latest"])).toBeNull();
-  expect(parseLabels(["self-hosted", "cpu=4"])).toBeNull();
-});
-
 test("parseLabels applies defaults", () => {
-  expect(spec(["ec2"])).toMatchObject({ cpu: 2, ram: 4, image: "ubuntu24-full-x64", disk: 40, spot: true });
+  expect(parseLabels(["ec2"])).toMatchObject({ cpu: 2, ram: 4, image: "ubuntu24-full-x64", disk: 40, spot: true });
 });
 
 test("parseLabels reads array and slash forms the same way", () => {
-  const a = spec(["ec2", "cpu=8", "ram=32", "family=c7i+m7i", "image=ubuntu24-full-arm64", "disk=100", "spot=false", "run=123"]);
-  const b = spec(["ec2/cpu=8/ram=32/family=c7i+m7i/image=ubuntu24-full-arm64/disk=100/spot=false/run=123"]);
+  const a = parseLabels(["ec2", "cpu=8", "ram=32", "family=c7i+m7i", "image=ubuntu24-full-arm64", "disk=100", "spot=false", "run=123"]);
+  const b = parseLabels(["ec2/cpu=8/ram=32/family=c7i+m7i/image=ubuntu24-full-arm64/disk=100/spot=false/run=123"]);
   expect(a).toEqual(b);
   expect(a).toMatchObject({ cpu: 8, ram: 32, families: ["c7i", "m7i"], spot: false });
 });
 
-test("parseLabels honors a custom trigger label", () => {
-  expect(parseLabels(["linux", "cpu=4"], "linux")).not.toBeNull();
-  expect(parseLabels(["ec2"], "linux")).toBeNull();
-  // GitHub matches labels case-insensitively.
-  expect(parseLabels(["EC2", "cpu=4"])).not.toBeNull();
+test("hasTriggerLabel matches the trigger label case-insensitively, in either label form", () => {
+  expect(hasTriggerLabel(["ubuntu-latest"])).toBe(false);
+  expect(hasTriggerLabel(["self-hosted", "cpu=4"])).toBe(false);
+  expect(hasTriggerLabel(["EC2", "cpu=4"])).toBe(true);
+  expect(hasTriggerLabel(["ec2/cpu=4"])).toBe(true);
+  expect(hasTriggerLabel(["linux", "cpu=4"], "linux")).toBe(true);
+  expect(hasTriggerLabel(["ec2"], "linux")).toBe(false);
 });
 
 test("parseLabels rejects bad numbers", () => {
@@ -58,22 +48,22 @@ test("parseLabels rejects bad numbers", () => {
 });
 
 test("instanceRequirements pins vCPUs and maps families to wildcards", () => {
-  const req = instanceRequirements(spec(["ec2", "cpu=16", "family=c7i+m7i.4xlarge"]));
+  const req = instanceRequirements(parseLabels(["ec2", "cpu=16", "family=c7i+m7i.4xlarge"]));
   expect(req.VCpuCount).toEqual({ Min: 16, Max: 16 });
   expect(req.MemoryMiB).toEqual({ Min: 32 * 1024 });
   expect(req.AllowedInstanceTypes).toEqual(["c7i.*", "m7i.4xlarge"]);
   expect(req.BurstablePerformance).toBe("excluded");
-  expect(instanceRequirements(spec(["ec2"])).AllowedInstanceTypes).toBeUndefined();
+  expect(instanceRequirements(parseLabels(["ec2"])).AllowedInstanceTypes).toBeUndefined();
 });
 
 test("nvme=true requires local SSD storage", () => {
-  const nvme = spec(["ec2", "nvme=true", "cpu=8"]);
+  const nvme = parseLabels(["ec2", "nvme=true", "cpu=8"]);
   expect(nvme.nvme).toBe(true);
   const req = instanceRequirements(nvme);
   expect(req.LocalStorage).toBe("required");
   expect(req.LocalStorageTypes).toEqual(["ssd"]);
-  expect(instanceRequirements(spec(["ec2"])).LocalStorage).toBeUndefined();
-  expect(spec(["ec2", "nvme=false"]).nvme).toBe(false);
+  expect(instanceRequirements(parseLabels(["ec2"])).LocalStorage).toBeUndefined();
+  expect(parseLabels(["ec2", "nvme=false"]).nvme).toBe(false);
 });
 
 test("verifySignature accepts GitHub's format and rejects tampering", async () => {
@@ -168,7 +158,7 @@ test("launchRunner tries spot in each subnet, then on-demand, one subnet per cal
     noCapacity,
     { Instances: [{ InstanceIds: ["i-1"], InstanceType: "c7i.xlarge", Lifecycle: "on-demand" }] },
   ]);
-  const result = await launchRunner(ec2, launchOpts(spec(["ec2", "cpu=4", "disk=80"])));
+  const result = await launchRunner(ec2, launchOpts(parseLabels(["ec2", "cpu=4", "disk=80"])));
   expect(result).toEqual({ instanceId: "i-1", instanceType: "c7i.xlarge", lifecycle: "on-demand", subnetId: "subnet-a" });
 
   expect(calls.map((c) => c.name)).toEqual([
@@ -204,14 +194,14 @@ test("launchRunner tries spot in each subnet, then on-demand, one subnet per cal
 
 test("launchRunner raises the disk to the AMI snapshot size", async () => {
   const { ec2, calls } = fakeEc2([{ Instances: [{ InstanceIds: ["i-2"] }] }]);
-  await launchRunner(ec2, launchOpts(spec(["ec2", "disk=10"])));
+  await launchRunner(ec2, launchOpts(parseLabels(["ec2", "disk=10"])));
   expect(calls[0]!.input.LaunchTemplateData.BlockDeviceMappings[0].Ebs.VolumeSize).toBe(30);
 });
 
 test("launchRunner with spot=false skips spot and reports every failure", async () => {
   const fail = { Instances: [], Errors: [{ ErrorCode: "X", ErrorMessage: "nope" }] };
   const { ec2, calls } = fakeEc2([fail, fail]);
-  await expect(launchRunner(ec2, launchOpts(spec(["ec2", "spot=false"])))).rejects.toThrow(
+  await expect(launchRunner(ec2, launchOpts(parseLabels(["ec2", "spot=false"])))).rejects.toThrow(
     /on-demand subnet-a: X: nope \| on-demand subnet-b: X: nope/,
   );
   const fleets = calls.filter((c) => c.name === "CreateFleetCommand");
@@ -234,7 +224,7 @@ test("resolveAmi reports an unknown AMI ID as a label error", async () => {
 
 test("assertInstanceTypesExist rejects a spec that no instance type matches", async () => {
   const none = fakeEc2([], { GetInstanceTypesFromInstanceRequirementsCommand: { InstanceTypes: [] } });
-  await expect(assertInstanceTypesExist(none.ec2, spec(["ec2", "cpu=3"]), ami)).rejects.toThrow(/No x86_64 instance type has cpu=3/);
+  await expect(assertInstanceTypesExist(none.ec2, parseLabels(["ec2", "cpu=3"]), ami)).rejects.toThrow(/No x86_64 instance type has cpu=3/);
   expect(none.calls[0]!.input).toMatchObject({
     ArchitectureTypes: ["x86_64"],
     VirtualizationTypes: ["hvm"],
@@ -242,7 +232,7 @@ test("assertInstanceTypesExist rejects a spec that no instance type matches", as
   });
 
   const some = fakeEc2([], { GetInstanceTypesFromInstanceRequirementsCommand: { InstanceTypes: [{ InstanceType: "c7i.xlarge" }] } });
-  await assertInstanceTypesExist(some.ec2, spec(["ec2", "cpu=4"]), ami);
+  await assertInstanceTypesExist(some.ec2, parseLabels(["ec2", "cpu=4"]), ami);
 });
 
 test("deleteStaleLaunchTemplateVersions deletes only old per-launch versions", async () => {
