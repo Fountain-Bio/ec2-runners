@@ -1,0 +1,30 @@
+# Checks every push to main and every pull request, on this stack's own EC2
+# runners, so a passing run also shows the runners work end to end.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  check:
+    runs-on: [ec2, cpu=2]
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.2
+
+      # Runs cfn-lint for `bun run lint:template`.
+      - uses: astral-sh/setup-uv@v10
+
+      - run: bun install --frozen-lockfile
+      - run: bun run typecheck
+      - run: bun test
+      # Starts DynamoDB Local in Docker.
+      - run: bun run test:integration
+      - run: bun run build
+      - run: bun run lint:template

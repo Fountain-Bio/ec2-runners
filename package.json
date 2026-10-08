@@ -8,7 +8,7 @@
     "test:integration": "bun test ./test/integration/jobs.integration.ts",
     "typecheck": "tsc --noEmit && tsc --noEmit -p test",
     "build": "bun build src/index.ts --target=node --format=esm --minify-whitespace --minify-syntax --outfile .build/lambda/index.mjs",
-    "lint:template": "cfn-lint template.yaml --ignore-checks W3002"
+    "lint:template": "uvx cfn-lint@1.57.2 template.yaml --ignore-checks W3002 --regions us-west-2"
   },
   "devDependencies": {
     "@octokit/openapi-webhooks-types": "12.2.0",

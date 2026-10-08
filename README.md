@@ -197,8 +197,10 @@ bun test
 bun run test:integration # jobs table against DynamoDB Local; needs Docker
 bun run typecheck        # tsc, for src/ (Node types only) and test/ (Bun types)
 bun run build            # writes .build/lambda/index.mjs; deploy.sh runs this
-bun run lint:template    # needs cfn-lint
+bun run lint:template    # cfn-lint through uvx; needs uv
 ```
+
+`.github/workflows/ci.yml` runs the same checks on every push to `main` and every pull request, on this stack's own `ec2` runners. A passing run therefore also shows that the webhook, reconciler, and runners work. If the stack is down, CI waits for a runner until the stack is fixed and redeployed.
 
 ## Removing it
 
