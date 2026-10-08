@@ -253,7 +253,7 @@ Resources:
                 Resource: !Ref GitHubAppSecret
               - Effect: Allow
                 Action: lambda:InvokeFunction
-                Resource: !Sub arn:${AWS::Partition}:lambda:${AWS::Region}:${AWS::AccountId}:function:${AWS::StackName}-reconciler
+                Resource: !GetAtt ReconcilerFunction.Arn
               - Effect: Allow
                 Action: [dynamodb:PutItem, dynamodb:UpdateItem]
                 Resource: !GetAtt JobsTable.Arn
@@ -420,21 +420,11 @@ Resources:
         Variables:
           SECRET_ARN: !Ref GitHubAppSecret
           GITHUB_ORG: !Ref GitHubOrg
-          TRIGGER_LABEL: !Ref TriggerLabel
-          RUNNER_GROUP_ID: !Ref RunnerGroupId
           RUNNER_PREFIX: !Ref AWS::StackName
-          RECONCILER_FUNCTION: !Sub ${AWS::StackName}-reconciler
+          TRIGGER_LABEL: !Ref TriggerLabel
+          RECONCILER_FUNCTION: !Ref ReconcilerFunction
           JOBS_TABLE: !Ref JobsTable
           ALERT_TOPIC_ARN: !Ref AlertTopic
-          LAUNCH_TEMPLATE_ID: !Ref RunnerLaunchTemplate
-          LAUNCH_TEMPLATE_VERSION: !GetAtt RunnerLaunchTemplate.DefaultVersionNumber
-          SUBNET_IDS: !Join [",", [!Ref SubnetA, !Ref SubnetB, !Ref SubnetC]]
-          CACHE_BUCKET: !Ref CacheBucket
-          IDLE_MINUTES: !Ref IdleMinutes
-          MAX_MINUTES: !Ref MaxMinutes
-          AMI_OWNER: !Ref AmiOwner
-          AMI_NAME_PREFIX: !Ref AmiNamePrefix
-          RUNNER_VERSION: !Ref RunnerVersion
           ALLOW_PUBLIC_REPOS: !Ref AllowPublicRepos
 
   WebhookUrl:
@@ -481,22 +471,20 @@ Resources:
         Variables:
           SECRET_ARN: !Ref GitHubAppSecret
           GITHUB_ORG: !Ref GitHubOrg
-          TRIGGER_LABEL: !Ref TriggerLabel
-          RUNNER_GROUP_ID: !Ref RunnerGroupId
           RUNNER_PREFIX: !Ref AWS::StackName
-          RECONCILER_FUNCTION: !Sub ${AWS::StackName}-reconciler
+          TRIGGER_LABEL: !Ref TriggerLabel
           JOBS_TABLE: !Ref JobsTable
           ALERT_TOPIC_ARN: !Ref AlertTopic
+          ALLOW_PUBLIC_REPOS: !Ref AllowPublicRepos
+          RUNNER_GROUP_ID: !Ref RunnerGroupId
           LAUNCH_TEMPLATE_ID: !Ref RunnerLaunchTemplate
           LAUNCH_TEMPLATE_VERSION: !GetAtt RunnerLaunchTemplate.DefaultVersionNumber
           SUBNET_IDS: !Join [",", [!Ref SubnetA, !Ref SubnetB, !Ref SubnetC]]
           CACHE_BUCKET: !Ref CacheBucket
-          IDLE_MINUTES: !Ref IdleMinutes
           MAX_MINUTES: !Ref MaxMinutes
           AMI_OWNER: !Ref AmiOwner
           AMI_NAME_PREFIX: !Ref AmiNamePrefix
           RUNNER_VERSION: !Ref RunnerVersion
-          ALLOW_PUBLIC_REPOS: !Ref AllowPublicRepos
 
   ReconcilerAsyncConfig:
     Type: AWS::Lambda::EventInvokeConfig
@@ -525,22 +513,11 @@ Resources:
         Variables:
           SECRET_ARN: !Ref GitHubAppSecret
           GITHUB_ORG: !Ref GitHubOrg
-          TRIGGER_LABEL: !Ref TriggerLabel
-          RUNNER_GROUP_ID: !Ref RunnerGroupId
           RUNNER_PREFIX: !Ref AWS::StackName
-          RECONCILER_FUNCTION: !Sub ${AWS::StackName}-reconciler
           JOBS_TABLE: !Ref JobsTable
-          ALERT_TOPIC_ARN: !Ref AlertTopic
-          LAUNCH_TEMPLATE_ID: !Ref RunnerLaunchTemplate
-          LAUNCH_TEMPLATE_VERSION: !GetAtt RunnerLaunchTemplate.DefaultVersionNumber
-          SUBNET_IDS: !Join [",", [!Ref SubnetA, !Ref SubnetB, !Ref SubnetC]]
-          CACHE_BUCKET: !Ref CacheBucket
           IDLE_MINUTES: !Ref IdleMinutes
           MAX_MINUTES: !Ref MaxMinutes
-          AMI_OWNER: !Ref AmiOwner
-          AMI_NAME_PREFIX: !Ref AmiNamePrefix
-          RUNNER_VERSION: !Ref RunnerVersion
-          ALLOW_PUBLIC_REPOS: !Ref AllowPublicRepos
+          LAUNCH_TEMPLATE_ID: !Ref RunnerLaunchTemplate
 
   MaintenanceSchedule:
     Type: AWS::Events::Rule

@@ -25,6 +25,10 @@ export interface Registration {
   labels: { name: string }[];
 }
 
+// A runner registration with no instance counts as a launch in progress for
+// this long. The reconciler's 5 minute timeout bounds a real launch.
+export const LAUNCH_GRACE_MS = 10 * 60_000;
+
 // Runner names are <prefix>-<job id>-<launch time>, where the launch time is
 // milliseconds since the epoch in base 36. The job ID records which job the
 // launch was for. The launch time makes every name unique and tells the

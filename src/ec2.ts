@@ -12,6 +12,7 @@ import {
   type EC2Client,
 } from "@aws-sdk/client-ec2";
 import { JobConfigError, instanceRequirements, type LaunchSpec } from "./labels.ts";
+import { errorMessage, log } from "./log.ts";
 
 export const TAG_STACK = "ec2-runners:stack";
 export const TAG_RUNNER = "ec2-runners:runner-name";
@@ -140,7 +141,6 @@ export interface LaunchOptions {
   userData: string;
   // Applied to the instance and its volumes. Must include TAG_RUNNER.
   tags: Record<string, string | number>;
-  log?: (line: string) => void;
   random?: () => number;
 }
 
@@ -155,7 +155,7 @@ export interface LaunchResult {
 // version, because EC2 Fleet cannot override user data and the user data
 // carries the job's JIT runner config. The version is deleted after launch.
 export async function launchRunner(ec2: Ec2, opts: LaunchOptions): Promise<LaunchResult> {
-  const { launchTemplateId, sourceVersion, subnetIds, spec, ami, userData, tags, log = console.log, random } = opts;
+  const { launchTemplateId, sourceVersion, subnetIds, spec, ami, userData, tags, random } = opts;
   const tagList = Object.entries(tags).map(([Key, Value]) => ({ Key, Value: String(Value) }));
 
   const { LaunchTemplateVersion } = await ec2.send(
@@ -202,14 +202,14 @@ export async function launchRunner(ec2: Ec2, opts: LaunchOptions): Promise<Launc
         }
         const summary = (res.Errors ?? []).map((e) => `${e.ErrorCode}: ${e.ErrorMessage}`).join("; ");
         errors.push(`${spot ? "spot" : "on-demand"} ${subnetId}: ${summary || "no instance returned"}`);
-        log(JSON.stringify({ msg: "fleet attempt failed", spot, subnetId, errors: res.Errors }));
+        log("fleet attempt failed", { spot, subnetId, errors: res.Errors });
       }
     }
     throw new Error(`Could not launch an instance. ${errors.join(" | ")}`);
   } finally {
     await ec2
       .send(new DeleteLaunchTemplateVersionsCommand({ LaunchTemplateId: launchTemplateId, Versions: [String(version)] }))
-      .catch((err) => log(JSON.stringify({ msg: "failed to delete launch template version", version, error: err.message })));
+      .catch((err) => log("failed to delete launch template version", { version, error: errorMessage(err) }));
   }
 }
 

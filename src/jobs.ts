@@ -4,7 +4,7 @@
 // job starts or finishes. The reconciler reads the queued rows. Rows expire
 // after a day, which is how long GitHub keeps a job queued before failing it.
 
-import { ConditionalCheckFailedException, type DynamoDBClient } from "@aws-sdk/client-dynamodb";
+import { ConditionalCheckFailedException, DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import { DynamoDBDocumentClient, PutCommand, UpdateCommand, paginateScan } from "@aws-sdk/lib-dynamodb";
 import * as z from "zod";
 import type { QueuedJob } from "./pool.ts";
@@ -119,4 +119,10 @@ export class JobStore {
     }
     return jobs;
   }
+}
+
+let cachedStore: JobStore | undefined;
+// The store for the deployed table, reused across invocations.
+export function jobStore(table: string): JobStore {
+  return (cachedStore ??= new JobStore(new DynamoDBClient({}), table));
 }
