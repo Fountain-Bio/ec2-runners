@@ -152,7 +152,7 @@ Push a workflow with `runs-on: [ec2]`. In the GitHub App's Advanced tab, recent 
 | `IdleMinutes` | `20` | Kill an instance that has not started a job after this long. Covers runners left over when a job is cancelled. |
 | `MaxMinutes` | `360` | Hard instance lifetime, enforced both by the boot script and the janitor. |
 | `AmiOwner`, `AmiNamePrefix` | RunsOn public images | Where `image=` names are looked up. |
-| `RunnerVersion` | `latest` | actions/runner version to download when the AMI does not have one at `/opt/ec2-runner`. The boot script checks the download against the SHA-256 digest GitHub publishes for the release asset. |
+| `RunnerVersion` | `latest` | actions/runner version to download when the AMI does not have one at `/opt/ec2-runner`. The boot script checks the download against the SHA-256 digest GitHub publishes for the release asset, so the version must be 2.325.0 or later. |
 | `CacheRetentionDays` | `10` | Lifecycle expiry on the cache bucket. |
 | `VpcCidr` | `10.42.0.0/16` | VPC range, split into three /20 subnets. |
 | `AllowPublicRepos` | `false` | Launch runners for jobs from public repositories. See setup step 4. |

@@ -130,7 +130,12 @@ export class GitHubClient {
     const filename = `actions-runner-linux-${arch}-${resolved}.tar.gz`;
     const asset = release.assets.find((a) => a.name === filename);
     const sha256 = asset?.digest?.match(/^sha256:([0-9a-f]{64})$/)?.[1];
-    if (!asset || !sha256) throw new Error(`actions/runner ${release.tag_name} has no ${filename} with a sha256 digest`);
+    if (!asset || !sha256) {
+      throw new Error(
+        `actions/runner ${release.tag_name} has no ${filename} with a sha256 digest. ` +
+          `GitHub publishes digests for releases from 2.325.0 on; set RunnerVersion to one of those or to "latest".`,
+      );
+    }
     return { version: resolved, url: asset.browser_download_url, sha256 };
   }
 }
