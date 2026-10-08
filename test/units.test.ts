@@ -57,6 +57,12 @@ test("instanceRequirements pins vCPUs and maps families to wildcards", () => {
   expect(instanceRequirements(parseLabels(["ec2"])).AllowedInstanceTypes).toBeUndefined();
 });
 
+test("instanceRequirements applies the stack's CPU floor", () => {
+  const req = instanceRequirements({ ...parseLabels(["ec2"]), cpuBaselineFamily: "m6i" });
+  expect(req.BaselinePerformanceFactors).toEqual({ Cpu: { References: [{ InstanceFamily: "m6i" }] } });
+  expect(instanceRequirements(parseLabels(["ec2"])).BaselinePerformanceFactors).toBeUndefined();
+});
+
 test("nvme=true requires local SSD storage", () => {
   const nvme = parseLabels(["ec2", "nvme=true", "cpu=8"]);
   expect(nvme.nvme).toBe(true);

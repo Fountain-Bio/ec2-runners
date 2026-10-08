@@ -252,7 +252,7 @@ async function reconcileJob(config: ReconcilerConfig, jobs: JobStore, gh: GitHub
 // when the job's labels can never launch, and other errors for failures a
 // retry may get past, such as a lack of capacity.
 async function launchForJob(config: ReconcilerConfig, gh: GitHubClient, job: QueuedJob): Promise<void> {
-  const spec = parseLabels(job.labels);
+  const spec = { ...parseLabels(job.labels), cpuBaselineFamily: config.CPU_BASELINE_FAMILY || undefined };
   // Everything that can reject the job's labels runs before the runner is
   // registered, so a bad label leaves no registration behind.
   const ami = await resolveAmi(ec2, spec.image, { owner: config.AMI_OWNER, namePrefix: config.AMI_NAME_PREFIX });

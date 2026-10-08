@@ -40,6 +40,7 @@ Object.assign(process.env, {
   AMI_NAME_PREFIX: "runs-on-v2.2-",
   RUNNER_VERSION: "latest",
   RECONCILE_RETRY_SECONDS: "0",
+  CPU_BASELINE_FAMILY: "m6i",
   BOOT_LOG_GROUP: "/ec2-runners/ec2-runners/boot",
   ALLOW_PUBLIC_REPOS: "false",
 });
@@ -365,6 +366,10 @@ test("reconciler launches a runner for a queued job with none available", async 
     "ec2-runners:run-id": "777",
   });
   expect(fleetCalls()).toHaveLength(1);
+  // The stack's CPU floor reaches both the instance type check and the fleet.
+  const floor = { Cpu: { References: [{ InstanceFamily: "m6i" }] } };
+  expect(awsCalls.find((c) => c.name === "GetInstanceTypesFromInstanceRequirementsCommand")!.input.InstanceRequirements.BaselinePerformanceFactors).toEqual(floor);
+  expect(fleetCalls()[0]!.input.LaunchTemplateConfigs[0].Overrides[0].InstanceRequirements.BaselinePerformanceFactors).toEqual(floor);
 });
 
 test("reconciler launches nothing when two jobs swap runners", async () => {

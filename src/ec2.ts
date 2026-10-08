@@ -88,8 +88,9 @@ export async function assertInstanceTypesExist(ec2: Ec2, spec: LaunchSpec, ami: 
   );
   if (InstanceTypes.length === 0) {
     const families = spec.families.length > 0 ? ` family=${spec.families.join("+")}` : "";
+    const floor = spec.cpuBaselineFamily ? ` at least as fast as ${spec.cpuBaselineFamily}` : "";
     throw new JobConfigError(
-      `No ${ami.architecture} instance type has cpu=${spec.cpu} ram>=${spec.ram}${families}${spec.nvme ? " nvme=true" : ""}`,
+      `No ${ami.architecture} instance type has cpu=${spec.cpu} ram>=${spec.ram}${families}${spec.nvme ? " nvme=true" : ""}${floor}`,
     );
   }
 }

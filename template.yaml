@@ -36,6 +36,13 @@ Parameters:
     Type: String
     Description: AMI name prefix. The image label is appended, then "-*".
     Default: runs-on-v2.2-
+  CpuBaselineFamily:
+    Type: String
+    Description: >-
+      Instance family whose CPU performance is the slowest a runner may get,
+      which keeps older types such as i3 and m5d out of attribute-based
+      selection. Empty allows any current-generation type.
+    Default: m6i
   RunnerVersion:
     Type: String
     Description: >-
@@ -516,6 +523,7 @@ Resources:
           AMI_NAME_PREFIX: !Ref AmiNamePrefix
           RUNNER_VERSION: !Ref RunnerVersion
           BOOT_LOG_GROUP: !Ref BootLogs
+          CPU_BASELINE_FAMILY: !Ref CpuBaselineFamily
 
   ReconcilerAsyncConfig:
     Type: AWS::Lambda::EventInvokeConfig

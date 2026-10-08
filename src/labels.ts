@@ -22,6 +22,9 @@ export interface LaunchSpec {
   nvme: boolean;
   // Instance families ("c7i") or full instance types ("c7i.2xlarge"). Empty allows any.
   families: string[];
+  // The slowest CPU allowed, as an instance family whose CPU performance is the
+  // floor ("m6i"). Set from the stack's CpuBaselineFamily, not from labels.
+  cpuBaselineFamily?: string;
 }
 
 // A job's labels ask for something that can never launch, such as cpu=abc or
@@ -104,6 +107,11 @@ export function instanceRequirements(spec: LaunchSpec): InstanceRequirementsRequ
   }
   if (spec.families.length > 0) {
     req.AllowedInstanceTypes = spec.families.map((f) => (f.includes(".") ? f : `${f}.*`));
+  }
+  if (spec.cpuBaselineFamily) {
+    // Excludes instance types whose CPUs are slower than this family's, which
+    // "current generation" alone still allows (i3 or m5d, for example).
+    req.BaselinePerformanceFactors = { Cpu: { References: [{ InstanceFamily: spec.cpuBaselineFamily }] } };
   }
   return req;
 }
