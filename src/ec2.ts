@@ -53,7 +53,14 @@ export async function resolveAmi(ec2: Ec2, image: string, { owner, namePrefix }:
           { Name: "state", Values: ["available"] },
         ],
       };
-  const { Images = [] } = await ec2.send(new DescribeImagesCommand(params));
+  // EC2 rejects an unknown or malformed AMI ID in ImageIds outright, where a
+  // name filter that matches nothing returns an empty list.
+  const { Images = [] } = await ec2.send(new DescribeImagesCommand(params)).catch((err: unknown) => {
+    if (err instanceof Error && (err.name === "InvalidAMIID.NotFound" || err.name === "InvalidAMIID.Malformed")) {
+      throw new JobConfigError(`image=${image}: ${err.message}`);
+    }
+    throw err;
+  });
   Images.sort((a, b) => (b.CreationDate ?? "").localeCompare(a.CreationDate ?? ""));
   const image0 = Images[0];
   if (!image0?.ImageId) throw new JobConfigError(`No AMI found for image=${image}`);

@@ -4,12 +4,13 @@ import { execFileSync } from "node:child_process";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { instanceRequirements, parseLabels, type LaunchSpec } from "../src/labels.ts";
+import { JobConfigError, instanceRequirements, parseLabels, type LaunchSpec } from "../src/labels.ts";
 import { verifySignature } from "../src/github.ts";
 import { availableRunners, canRun, parseRunnerName, runnerName, unmatchedJobs } from "../src/pool.ts";
 import { buildUserData } from "../src/userdata.ts";
 import {
   assertInstanceTypesExist,
+  resolveAmi,
   deleteStaleLaunchTemplateVersions,
   launchRunner,
   shuffled,
@@ -218,6 +219,14 @@ test("launchRunner with spot=false skips spot and reports every failure", async 
 
 test("shuffled keeps every item", () => {
   expect(shuffled(["a", "b", "c"], () => 0).sort()).toEqual(["a", "b", "c"]);
+});
+
+test("resolveAmi reports an unknown AMI ID as a label error", async () => {
+  const send = async () => {
+    throw Object.assign(new Error("The image id '[ami-0000000000000dead]' does not exist"), { name: "InvalidAMIID.NotFound" });
+  };
+  const ec2 = { send } as unknown as Ec2;
+  await expect(resolveAmi(ec2, "ami-0000000000000dead", { owner: "1", namePrefix: "x-" })).rejects.toBeInstanceOf(JobConfigError);
 });
 
 test("assertInstanceTypesExist rejects a spec that no instance type matches", async () => {
