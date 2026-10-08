@@ -143,6 +143,7 @@ const baseRoutes = (): Record<string, Route> => ({
     },
   },
   "GET /orgs/example-org/actions/runners": { body: { total_count: 0, runners: [] } },
+  "GET /orgs/example-org/actions/runner-groups/1": { body: { id: 1, name: "Default", allows_public_repositories: false } },
   "POST /orgs/example-org/actions/runners/generate-jitconfig": {
     status: 201,
     body: { runner: { id: 1001, name: "registered" }, encoded_jit_config: "JITCFG" },
@@ -361,6 +362,29 @@ test("reconciler launches for a job whose only fitting runner was taken", async 
   ec2Handler = ec2With({ instances: [instance("i-600", "running", 1, runner600)] });
 
   expect((await reconciler()).outcomes).toEqual({ 555: "launched" });
+});
+
+test("reconciler launches nothing while the runner group allows public repositories", async () => {
+  queuedRow(559, ["ec2"]);
+  githubJob("example-org/app", 559);
+  ghRoutes["GET /orgs/example-org/actions/runner-groups/1"] = { body: { id: 1, name: "Default", allows_public_repositories: true } };
+  // A private result is cached for an hour, so this test moves the clock past
+  // the result cached by earlier tests.
+  const realNow = Date.now;
+  Date.now = () => realNow() + 2 * 3600_000;
+  try {
+    expect(await reconciler()).toEqual({ queued: 0, available: 0, outcomes: {} });
+    expect(await reconciler()).toEqual({ queued: 0, available: 0, outcomes: {} });
+    // One alert for the two reconciles.
+    expect(alerts()).toHaveLength(1);
+    expect(fleetCalls()).toHaveLength(0);
+
+    // Launches resume once the group is private again.
+    ghRoutes["GET /orgs/example-org/actions/runner-groups/1"] = { body: { id: 1, name: "Default", allows_public_repositories: false } };
+    expect((await reconciler()).outcomes).toEqual({ 559: "launched" });
+  } finally {
+    Date.now = realNow;
+  }
 });
 
 test("reconciler marks done a job GitHub already started", async () => {

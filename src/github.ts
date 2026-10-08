@@ -88,6 +88,24 @@ export class GitHubClient {
     return data;
   }
 
+  // Whether the org runner group lets public repositories' jobs use its
+  // runners. Undefined when the org has no runner group API, such as on
+  // GitHub Free, where every org runner is in the Default group.
+  async runnerGroupAllowsPublicRepos(runnerGroupId: number): Promise<boolean | undefined> {
+    const gh = await this.octokit();
+    try {
+      // Octokit has no generated method for this endpoint, so it goes through the typed request route.
+      const { data } = await gh.request("GET /orgs/{org}/actions/runner-groups/{runner_group_id}", {
+        org: this.org,
+        runner_group_id: runnerGroupId,
+      });
+      return data.allows_public_repositories;
+    } catch (err) {
+      if (isGitHubError(err, 404) || isGitHubError(err, 403)) return undefined;
+      throw err;
+    }
+  }
+
   async listRunners(namePrefix: string) {
     const gh = await this.octokit();
     const runners = await gh.paginate(gh.rest.actions.listSelfHostedRunnersForOrg, { org: this.org, per_page: 100 });

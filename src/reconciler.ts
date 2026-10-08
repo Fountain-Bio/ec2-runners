@@ -36,6 +36,8 @@ const ALERT_AFTER_FAILURES = 3;
 // A job that still waits after this many of its runners sat idle until the
 // janitor terminated them is failed, since another runner would idle too.
 const MAX_IDLE_RUNNERS = 2;
+// How often the reconciler rereads the runner group's public-repository setting.
+const RUNNER_GROUP_CHECK_MS = 60 * 60_000;
 
 const ec2 = new EC2Client({});
 
@@ -46,6 +48,7 @@ export async function reconciler(): Promise<{ queued: number; available: number;
   const jobs = jobStore(config.JOBS_TABLE);
   const now = Date.now();
   const gh = await github(config);
+  if (!(await runnerGroupIsPrivate(config, gh, now))) return { queued: 0, available: 0, outcomes: {} };
   const [queued, registrations, instances] = await Promise.all([
     jobs.listQueued(),
     gh.listRunners(`${config.RUNNER_PREFIX}-`),
@@ -65,6 +68,37 @@ export async function reconciler(): Promise<{ queued: number; available: number;
   });
   log("reconciled", { queued: queued.length, available: available.length, outcomes });
   return { queued: queued.length, available: available.length, outcomes };
+}
+
+// The webhook ignores public repositories' jobs unless ALLOW_PUBLIC_REPOS is
+// set, but GitHub hands runners to any job the runner group allows. If the
+// group allows public repositories, a fork pull request could take a runner
+// launched for a private job, so the reconciler launches nothing and alerts.
+// A private result is cached for an hour. A public one is rechecked on every
+// reconcile, so launches resume as soon as the setting is fixed.
+let privateGroupCheckedAt: number | undefined;
+let alertedPublicGroup = false;
+async function runnerGroupIsPrivate(config: ReconcilerConfig, gh: GitHubClient, now: number): Promise<boolean> {
+  if (config.ALLOW_PUBLIC_REPOS) return true;
+  if (privateGroupCheckedAt !== undefined && now - privateGroupCheckedAt < RUNNER_GROUP_CHECK_MS) return true;
+  const allowsPublic = await gh.runnerGroupAllowsPublicRepos(config.RUNNER_GROUP_ID);
+  if (allowsPublic !== true) {
+    privateGroupCheckedAt = now;
+    alertedPublicGroup = false;
+    return true;
+  }
+  privateGroupCheckedAt = undefined;
+  log("runner group allows public repositories, launching nothing", { runnerGroupId: config.RUNNER_GROUP_ID });
+  if (!alertedPublicGroup) {
+    alertedPublicGroup = true;
+    await alert(
+      config.ALERT_TOPIC_ARN,
+      "Runner group allows public repositories",
+      `Runner group ${config.RUNNER_GROUP_ID} allows public repositories, but the stack's AllowPublicRepos parameter is false. ` +
+        `Jobs from forks could take runners launched for private jobs. No runners launch until one of the two settings changes.`,
+    );
+  }
+  return false;
 }
 
 // Runs fn over items with at most `limit` calls in flight.

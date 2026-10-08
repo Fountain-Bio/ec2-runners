@@ -24,6 +24,7 @@ The `<stack>-alerts` SNS topic receives these alerts:
 - A job whose labels can never launch, such as `cpu=3` or an unknown image. Sent once per job.
 - A job that has failed to launch three times, for example for lack of capacity. The reconciler keeps retrying it every 5 minutes.
 - A job whose runners keep going unused. When two runners launched for a job sit idle until the janitor terminates them while the job is still queued, GitHub is not assigning the job to them. Usually the runner group does not allow the job's repository. The reconciler stops launching for that job.
+- The runner group allows public repositories while `AllowPublicRepos` is false. No runners launch until one of the two settings changes.
 - A reconciler run that failed after Lambda's two retries.
 
 A job that cannot launch stays queued in GitHub until it is cancelled or GitHub's 24-hour queue limit ends it.
@@ -135,7 +136,7 @@ aws secretsmanager put-secret-value \
 
 ### 4. Check the runner group
 
-The reconciler registers runners in the org's Default runner group (ID 1). Jobs from public repositories are ignored by default, because pull requests from forks would run untrusted code with write access to the shared cache bucket. To use these runners from public repositories anyway, deploy with `AllowPublicRepos=true` and enable "Allow public repositories" on the runner group in org settings under Actions, Runner groups.
+The reconciler registers runners in the org's Default runner group (ID 1). Jobs from public repositories are ignored by default, because pull requests from forks would run untrusted code with write access to the shared cache bucket. To use these runners from public repositories anyway, deploy with `AllowPublicRepos=true` and enable "Allow public repositories" on the runner group in org settings under Actions, Runner groups. GitHub gives runners to any job the runner group allows, so the reconciler also reads the group's setting: while the group allows public repositories and `AllowPublicRepos` is false, it launches nothing and sends an alert.
 
 ### 5. Test
 
