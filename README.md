@@ -156,7 +156,7 @@ Push a workflow with `runs-on: [ec2]`. In the GitHub App's Advanced tab, recent 
 | `CacheRetentionDays` | `10` | Lifecycle expiry on the cache bucket. |
 | `VpcCidr` | `10.42.0.0/16` | VPC range, split into three /20 subnets. |
 | `AllowPublicRepos` | `false` | Launch runners for jobs from public repositories. See setup step 4. |
-| `AlertEmail` | empty | Email address subscribed to the `<stack>-alerts` topic, which receives launches that failed after retries. |
+| `AlertEmail` | empty | Email address subscribed to the `<stack>-alerts` topic. See [Alerts](#alerts) for what it receives. |
 
 Pass overrides as `./deploy.sh Key=Value …`.
 

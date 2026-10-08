@@ -1,8 +1,9 @@
 AWSTemplateFormatVersion: "2010-09-09"
 Description: >-
-  Ephemeral GitHub Actions runners on EC2 Spot. A GitHub App webhook hits a
-  Lambda function URL, which launches one fresh instance per job; the instance
-  runs the job and terminates itself. Includes an S3 bucket for runs-on/cache.
+  Ephemeral GitHub Actions runners on EC2 Spot. A GitHub App webhook records
+  queued jobs in a DynamoDB table, and a reconciler launches a fresh instance
+  for each job the idle runners cannot cover. Each instance runs one job and
+  terminates itself. Includes an S3 bucket for runs-on/cache.
 
 Parameters:
   GitHubOrg:
@@ -364,8 +365,6 @@ Resources:
                   StringEquals:
                     aws:ResourceTag/ec2-runners:stack: !Ref AWS::StackName
 
-  # Receives alerts: job labels that can never launch, launches that keep
-  # failing, and reconciler invocations that failed after Lambda's retries.
   # Jobs that asked for an EC2 runner, keyed by GitHub job ID. The webhook
   # writes them and the reconciler reads the queued ones. Rows expire after a
   # day through the expiresAt TTL attribute.
@@ -384,6 +383,9 @@ Resources:
         AttributeName: expiresAt
         Enabled: true
 
+  # Receives alerts: job labels that can never launch, launches that keep
+  # failing, jobs whose runners keep going unused, a runner group that admits
+  # public repositories, and reconciler runs that failed after Lambda's retries.
   AlertTopic:
     Type: AWS::SNS::Topic
     Properties:

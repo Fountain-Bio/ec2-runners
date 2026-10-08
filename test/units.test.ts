@@ -244,9 +244,9 @@ test("deleteStaleLaunchTemplateVersions deletes only old per-launch versions", a
         // the stack's base version
         { VersionNumber: 1, DefaultVersion: true, CreateTime: hoursAgo(100) },
         // left behind by a reconciler that stopped
-        { VersionNumber: 5, VersionDescription: "ec2-runners-555", CreateTime: hoursAgo(3) },
+        { VersionNumber: 5, VersionDescription: runnerName("ec2-runners", 555, now - 3 * 3600_000), CreateTime: hoursAgo(3) },
         // in use by a launch happening now
-        { VersionNumber: 6, VersionDescription: "ec2-runners-556", CreateTime: hoursAgo(0.01) },
+        { VersionNumber: 6, VersionDescription: runnerName("ec2-runners", 556, now - 36_000), CreateTime: hoursAgo(0.01) },
         // created outside this stack's reconciler
         { VersionNumber: 7, VersionDescription: "manual", CreateTime: hoursAgo(5) },
       ],
