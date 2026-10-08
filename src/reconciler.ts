@@ -17,6 +17,7 @@ import {
   launchRunner,
   listRunnerInstances,
   resolveAmi,
+  terminateInstances,
   type Ami,
 } from "./ec2.ts";
 import { isGitHubError, type GitHubClient, type RunnerDownload } from "./github.ts";
@@ -24,7 +25,7 @@ import { jobStore, type JobStore, type QueuedJob } from "./jobs.ts";
 import { JobConfigError, parseLabels } from "./labels.ts";
 import { ReconcileLock } from "./lock.ts";
 import { errorMessage, log } from "./log.ts";
-import { LAUNCH_GRACE_MS, availableRunners, runnerName, unmatchedJobs } from "./pool.ts";
+import { LAUNCH_GRACE_MS, availableRunners, matchJobs, retirableRunners, runnerName, type AvailableRunner } from "./pool.ts";
 import { buildUserData } from "./userdata.ts";
 
 // Launches the reconciler runs at once.
@@ -55,7 +56,7 @@ type LaunchOutcome = "launched" | "already started" | "gone" | "failed" | "will 
 
 // The schedule passes an EventBridge event and the webhook passes none; the
 // reconciler reads neither. The context is absent in tests.
-type PassResult = { queued: number; available: number; outcomes: Record<string, LaunchOutcome> };
+type PassResult = { queued: number; available: number; outcomes: Record<string, LaunchOutcome>; retired: string[] };
 
 // Returns undefined when another invocation is reconciling; that invocation
 // runs another pass for this one.
@@ -79,14 +80,14 @@ async function reconcilePass(config: ReconcilerConfig, context?: Pick<Context, "
   const jobs = jobStore(config.JOBS_TABLE);
   const now = Date.now();
   const gh = await github(config);
-  if (!(await runnerGroupIsPrivate(config, gh, now))) return { queued: 0, available: 0, outcomes: {} };
+  if (!(await runnerGroupIsPrivate(config, gh, now))) return { queued: 0, available: 0, outcomes: {}, retired: [] };
   const [queued, registrations, instances] = await Promise.all([
     jobs.listQueued(),
     gh.listRunners(`${config.RUNNER_PREFIX}-`),
     listRunnerInstances(ec2, config.RUNNER_PREFIX),
   ]);
   const available = availableRunners({ prefix: config.RUNNER_PREFIX, registrations, instances, now, graceMs: LAUNCH_GRACE_MS });
-  const uncovered = unmatchedJobs(queued, available);
+  const { uncovered, spare } = matchJobs(queued, available);
 
   const outcomes: Record<string, LaunchOutcome> = {};
   // Each job's errors stay with that job, so one failure never ends the
@@ -102,8 +103,28 @@ async function reconcilePass(config: ReconcilerConfig, context?: Pick<Context, "
       return "error" as const;
     });
   });
-  log("reconciled", { queued: queued.length, available: available.length, outcomes });
-  return { queued: queued.length, available: available.length, outcomes };
+
+  const retired = await retireRunners(gh, retirableRunners(spare, new Set(queued.map((j) => j.jobId)), config.RUNNER_PREFIX));
+  log("reconciled", { queued: queued.length, available: available.length, outcomes, retired });
+  return { queued: queued.length, available: available.length, outcomes, retired };
+}
+
+// Removes runners that no queued job needs, so a job cancelled before it
+// started does not leave its runner idling until the janitor's IdleMinutes.
+// The registration goes first, so GitHub cannot assign the runner a job while
+// its instance terminates. Returns the names of the runners removed.
+async function retireRunners(gh: GitHubClient, runners: readonly (AvailableRunner & { instanceId: string })[]): Promise<string[]> {
+  const retired: string[] = [];
+  for (const runner of runners) {
+    try {
+      await gh.deleteRunner(runner.id);
+      await terminateInstances(ec2, [runner.instanceId]);
+      retired.push(runner.name);
+    } catch (err) {
+      log("failed to retire spare runner; the janitor will terminate it", { name: runner.name, error: errorMessage(err) });
+    }
+  }
+  return retired;
 }
 
 // The webhook ignores public repositories' jobs unless ALLOW_PUBLIC_REPOS is

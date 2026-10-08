@@ -296,6 +296,16 @@ test("webhook marks started and completed jobs done", async () => {
   expect(table.get(556)?.status).toBe("done");
 });
 
+test("webhook reconciles when a job ends before it started", async () => {
+  const cancelled = { ...jobEvent("completed", ["ec2"], { id: 600 }), conclusion: "cancelled" };
+  expect((await webhook(delivery("workflow_job", cancelled))).statusCode).toBe(202);
+  expect(reconcilerInvokes()).toHaveLength(1);
+
+  // A job that ran on a runner leaves nothing to clean up.
+  await webhook(delivery("workflow_job", jobEvent("completed", ["ec2"], { id: 601, runnerName: runnerName(PREFIX, 601) })));
+  expect(reconcilerInvokes()).toHaveLength(1);
+});
+
 test("webhook reconciles when a job starts on a runner launched for another job", async () => {
   const res = await webhook(delivery("workflow_job", jobEvent("in_progress", ["ec2"], { id: 600, runnerName: runnerName(PREFIX, 555) })));
   expect(res.statusCode).toBe(202);
@@ -383,8 +393,8 @@ test("reconciler launches nothing while the runner group allows public repositor
   const realNow = Date.now;
   Date.now = () => realNow() + 2 * 3600_000;
   try {
-    expect(await reconciler()).toEqual({ queued: 0, available: 0, outcomes: {} });
-    expect(await reconciler()).toEqual({ queued: 0, available: 0, outcomes: {} });
+    expect(await reconciler()).toEqual({ queued: 0, available: 0, outcomes: {}, retired: [] });
+    expect(await reconciler()).toEqual({ queued: 0, available: 0, outcomes: {}, retired: [] });
     // One alert for the two reconciles.
     expect(alerts()).toHaveLength(1);
     expect(fleetCalls()).toHaveLength(0);
@@ -404,6 +414,31 @@ test("reconciler starts no launch without time to finish it", async () => {
   expect(result.outcomes).toEqual({ 560: "deferred" });
   expect(table.get(560)?.status).toBe("queued");
   expect(fleetCalls()).toHaveLength(0);
+});
+
+test("reconciler retires an idle runner whose job ended before it started", async () => {
+  // Job 600 was cancelled while queued. Its runner is up and idle, and no job waits.
+  const runner600 = runnerName(PREFIX, 600);
+  ghRoutes["GET /orgs/example-org/actions/runners"] = { body: { total_count: 1, runners: [registration(5, runner600, ["ec2"])] } };
+  ghRoutes["DELETE /orgs/example-org/actions/runners/5"] = { status: 204 };
+  ec2Handler = ec2With({ instances: [instance("i-600", "running", 1, runner600)] });
+
+  const result = await reconciler();
+  expect(result.retired).toEqual([runner600]);
+  expect(ghCalls.map((c) => c.key)).toContain("DELETE /orgs/example-org/actions/runners/5");
+  expect(awsCalls.find((c) => c.name === "TerminateInstancesCommand")?.input).toEqual({ InstanceIds: ["i-600"] });
+});
+
+test("reconciler keeps an idle runner that a queued job can use", async () => {
+  // Job 600's runner is spare for job 600, which was cancelled, but job 601 fits it.
+  queuedRow(601, ["ec2"]);
+  const runner600 = runnerName(PREFIX, 600);
+  ghRoutes["GET /orgs/example-org/actions/runners"] = { body: { total_count: 1, runners: [registration(5, runner600, ["ec2"])] } };
+  ec2Handler = ec2With({ instances: [instance("i-600", "running", 1, runner600)] });
+
+  const result = await reconciler();
+  expect(result).toMatchObject({ outcomes: {}, retired: [] });
+  expect(awsCalls.some((c) => c.name === "TerminateInstancesCommand")).toBe(false);
 });
 
 test("reconciler marks done a job GitHub already started", async () => {

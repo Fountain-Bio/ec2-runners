@@ -330,6 +330,13 @@ Resources:
               - Effect: Allow
                 Action: [dynamodb:Scan, dynamodb:UpdateItem]
                 Resource: !GetAtt JobsTable.Arn
+              # Terminates spare runners whose job was cancelled before it started.
+              - Effect: Allow
+                Action: ec2:TerminateInstances
+                Resource: "*"
+                Condition:
+                  StringEquals:
+                    aws:ResourceTag/ec2-runners:stack: !Ref AWS::StackName
               # Alerts about jobs that cannot launch or keep failing to launch.
               - Effect: Allow
                 Action: sns:Publish

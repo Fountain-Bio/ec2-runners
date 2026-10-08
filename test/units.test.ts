@@ -7,7 +7,7 @@ import { join } from "node:path";
 import { JobConfigError, hasTriggerLabel, instanceRequirements, parseLabels, type LaunchSpec } from "../src/labels.ts";
 import { alertMessage } from "../src/alerts.ts";
 import { verifySignature } from "../src/github.ts";
-import { availableRunners, canRun, classifyRunners, parseRunnerName, runnerName, unmatchedJobs } from "../src/pool.ts";
+import { availableRunners, canRun, classifyRunners, matchJobs, parseRunnerName, retirableRunners, runnerName } from "../src/pool.ts";
 import { buildUserData } from "../src/userdata.ts";
 import {
   assertInstanceTypesExist,
@@ -305,11 +305,12 @@ test("canRun follows GitHub's label subset rule", () => {
 test("availableRunners keeps idle runners that are running or still launching", () => {
   const now = Date.parse("2026-10-08T12:00:00Z");
   const reg = (jobId: number, minutesAgo: number, busy = false) => ({
+    id: jobId,
     name: runnerName("ec2-runners", jobId, now - minutesAgo * 60_000),
     busy,
     labels: [{ name: "ec2" }],
   });
-  const registrations = [reg(1, 2), reg(2, 2, true), reg(3, 2), reg(4, 2), reg(5, 30), { name: "other-runner", busy: false, labels: [] }];
+  const registrations = [reg(1, 2), reg(2, 2, true), reg(3, 2), reg(4, 2), reg(5, 30), { id: 99, name: "other-runner", busy: false, labels: [] }];
   const inst = (r: { name: string }, state: string) => ({ instanceId: `i-${r.name}`, state, launchTime: new Date(now), runnerName: r.name });
   const instances = [inst(registrations[0]!, "running"), inst(registrations[1]!, "running"), inst(registrations[2]!, "terminated")];
   const available = availableRunners({ prefix: "ec2-runners", registrations, instances, now, graceMs: 10 * 60_000 });
@@ -321,6 +322,7 @@ test("availableRunners keeps idle runners that are running or still launching", 
 test("classifyRunners treats an ended instance and an overdue launch as stale", () => {
   const now = Date.parse("2026-10-08T12:00:00Z");
   const reg = (jobId: number, minutesAgo: number, busy = false) => ({
+    id: jobId,
     name: runnerName("ec2-runners", jobId, now - minutesAgo * 60_000),
     busy,
     labels: [],
@@ -330,9 +332,9 @@ test("classifyRunners treats an ended instance and an overdue launch as stale", 
     prefix: "ec2-runners",
     registrations: [running, busyEnded, ended, launching, overdue],
     instances: [
-      { runnerName: running.name, state: "running" },
-      { runnerName: busyEnded.name, state: "terminated" },
-      { runnerName: ended.name, state: "shutting-down" },
+      { instanceId: "i-1", runnerName: running.name, state: "running" },
+      { instanceId: "i-2", runnerName: busyEnded.name, state: "terminated" },
+      { instanceId: "i-3", runnerName: ended.name, state: "shutting-down" },
     ],
     now,
     graceMs: 10 * 60_000,
@@ -340,26 +342,40 @@ test("classifyRunners treats an ended instance and an overdue launch as stale", 
   expect(states).toEqual(["live", "busy", "stale", "launching", "stale"]);
 });
 
-test("unmatchedJobs needs no launch when two jobs swap runners", () => {
+test("matchJobs needs no launch when two jobs swap runners", () => {
   // Jobs 1 and 2 both asked for [ec2]; each runner can take either job.
   const jobs = [{ id: 1, labels: ["ec2"] }, { id: 2, labels: ["ec2"] }];
-  expect(unmatchedJobs(jobs, [{ labels: ["ec2"] }, { labels: ["ec2"] }])).toEqual([]);
+  expect(matchJobs(jobs, [{ labels: ["ec2"] }, { labels: ["ec2"] }]).uncovered).toEqual([]);
 });
 
-test("unmatchedJobs finds the job a smaller job left without a fitting runner", () => {
+test("matchJobs finds the job a smaller job left without a fitting runner", () => {
   // The [ec2] job took the cpu=8 runner. The remaining [ec2] runner cannot run the cpu=8 job.
   const big = { id: 1, labels: ["ec2", "cpu=8"] };
-  expect(unmatchedJobs([big], [{ labels: ["ec2"] }])).toEqual([big]);
+  expect(matchJobs([big], [{ labels: ["ec2"] }]).uncovered).toEqual([big]);
 });
 
-test("unmatchedJobs reassigns runners to cover every job it can", () => {
+test("matchJobs reassigns runners to cover every job it can", () => {
   // A greedy pass that gives the cpu=8 runner to the [ec2] job would strand
   // the cpu=8 job; the matching moves the [ec2] job to the plain runner.
   const small = { id: 1, labels: ["ec2"] };
   const big = { id: 2, labels: ["ec2", "cpu=8"] };
   const runners = [{ labels: ["ec2", "cpu=8"] }, { labels: ["ec2"] }];
-  expect(unmatchedJobs([small, big], runners)).toEqual([]);
+  expect(matchJobs([small, big], runners).uncovered).toEqual([]);
   // A third job leaves exactly one job uncovered.
   const third = { id: 3, labels: ["ec2"] };
-  expect(unmatchedJobs([small, big, third], runners)).toHaveLength(1);
+  expect(matchJobs([small, big, third], runners).uncovered).toHaveLength(1);
+});
+
+test("retirableRunners keeps runners a queued job may still need", () => {
+  const now = Date.parse("2026-10-08T12:00:00Z");
+  const runner = (jobId: number, state: "live" | "launching", instanceId: string | undefined = `i-${jobId}`) => ({
+    id: jobId,
+    name: runnerName("ec2-runners", jobId, now),
+    labels: ["ec2"],
+    state,
+    instanceId,
+  });
+  const spare = [runner(1, "live"), runner(2, "live"), runner(3, "launching", undefined)];
+  // Job 2 still waits, so its runner stays; job 3's runner is still launching.
+  expect(retirableRunners(spare, new Set([2]), "ec2-runners").map((r) => r.id)).toEqual([1]);
 });

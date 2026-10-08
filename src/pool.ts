@@ -11,6 +11,7 @@ import type { RunnerInstance } from "./ec2.ts";
 
 // The fields this module reads from a GitHub self-hosted runner registration.
 export interface Registration {
+  id: number;
   name: string;
   busy: boolean;
   labels: { name: string }[];
@@ -55,7 +56,7 @@ export type RunnerState = "busy" | "live" | "launching" | "stale";
 export interface PoolSnapshot<R extends Registration = Registration> {
   prefix: string;
   registrations: readonly R[];
-  instances: readonly Pick<RunnerInstance, "runnerName" | "state">[];
+  instances: readonly Pick<RunnerInstance, "instanceId" | "runnerName" | "state">[];
   now: number;
   graceMs: number;
 }
@@ -68,32 +69,48 @@ export function classifyRunners<R extends Registration>({
   instances,
   now,
   graceMs,
-}: PoolSnapshot<R>): { registration: R; state: RunnerState }[] {
-  const stateByRunner = new Map(instances.map((i) => [i.runnerName, i.state]));
+}: PoolSnapshot<R>): { registration: R; state: RunnerState; instanceId: string | undefined }[] {
+  const instanceByRunner = new Map(instances.map((i) => [i.runnerName, i]));
   return registrations.flatMap((registration) => {
     const parsed = parseRunnerName(prefix, registration.name);
     if (!parsed) return [];
-    const instanceState = stateByRunner.get(registration.name);
+    const instance = instanceByRunner.get(registration.name);
     let state: RunnerState;
     if (registration.busy) state = "busy";
-    else if (instanceState === undefined) state = now - parsed.launchedAt < graceMs ? "launching" : "stale";
-    else state = instanceState === "pending" || instanceState === "running" ? "live" : "stale";
-    return [{ registration, state }];
+    else if (instance === undefined) state = now - parsed.launchedAt < graceMs ? "launching" : "stale";
+    else state = instance.state === "pending" || instance.state === "running" ? "live" : "stale";
+    return [{ registration, state, instanceId: instance?.instanceId }];
   });
 }
 
-// The registrations that can still take a queued job, with their labels.
-export function availableRunners(snapshot: PoolSnapshot): { name: string; labels: string[] }[] {
-  return classifyRunners(snapshot)
-    .filter(({ state }) => state === "live" || state === "launching")
-    .map(({ registration: r }) => ({ name: r.name, labels: r.labels.map((l) => l.name) }));
+// A runner that can still take a queued job.
+export interface AvailableRunner {
+  // The GitHub registration's ID.
+  id: number;
+  name: string;
+  labels: string[];
+  state: "live" | "launching";
+  // Undefined while the runner is launching.
+  instanceId: string | undefined;
+}
+
+export function availableRunners(snapshot: PoolSnapshot): AvailableRunner[] {
+  return classifyRunners(snapshot).flatMap(({ registration: r, state, instanceId }) =>
+    state === "live" || state === "launching"
+      ? [{ id: r.id, name: r.name, labels: r.labels.map((l) => l.name), state, instanceId }]
+      : [],
+  );
 }
 
 // Pairs queued jobs with available runners so that as many jobs as possible
-// have a runner they can run on, and returns the jobs left over. Uses Kuhn's
-// augmenting-path algorithm for maximum bipartite matching, which is fast for
-// the tens of jobs and runners involved here.
-export function unmatchedJobs<J extends { labels: string[] }>(jobs: readonly J[], runners: readonly { labels: string[] }[]): J[] {
+// have a runner they can run on. Returns the jobs left without one, which need
+// a launch, and the runners left without a job. Uses Kuhn's augmenting-path
+// algorithm for maximum bipartite matching, which is fast for the tens of jobs
+// and runners involved here.
+export function matchJobs<J extends { labels: string[] }, R extends { labels: string[] }>(
+  jobs: readonly J[],
+  runners: readonly R[],
+): { uncovered: J[]; spare: R[] } {
   const fits = jobs.map((job) => runners.flatMap((runner, i) => (canRun(runner.labels, job.labels) ? [i] : [])));
   // jobForRunner[i] is the index of the job runner i is assigned to.
   const jobForRunner: (number | undefined)[] = runners.map(() => undefined);
@@ -113,5 +130,23 @@ export function unmatchedJobs<J extends { labels: string[] }>(jobs: readonly J[]
     return false;
   };
 
-  return jobs.filter((_, j) => !assign(j, new Set()));
+  const uncovered = jobs.filter((_, j) => !assign(j, new Set()));
+  return { uncovered, spare: runners.filter((_, r) => jobForRunner[r] === undefined) };
+}
+
+// The spare runners worth terminating now: running, and launched for a job
+// that no longer waits (it started on another runner, finished, or was
+// cancelled before it started). A spare runner is in no maximum matching's
+// way, so terminating it leaves every queued job as covered as before.
+// Launching runners are left for the janitor, since their instance may not
+// exist yet, and a spare runner whose own job still waits is kept for it.
+export function retirableRunners(
+  spare: readonly AvailableRunner[],
+  queuedJobIds: ReadonlySet<number>,
+  prefix: string,
+): (AvailableRunner & { instanceId: string })[] {
+  return spare.filter((r): r is AvailableRunner & { instanceId: string } => {
+    const launchedFor = parseRunnerName(prefix, r.name)?.jobId;
+    return r.state === "live" && r.instanceId !== undefined && launchedFor !== undefined && !queuedJobIds.has(launchedFor);
+  });
 }

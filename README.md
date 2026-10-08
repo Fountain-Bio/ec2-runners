@@ -15,6 +15,8 @@ GitHub gives a queued job to any idle runner whose labels include all of the job
 
 Reconciles never overlap: each pass holds a lock item in the jobs table. An invocation that finds the lock held records a request and exits, and the holder runs one more pass for each request before releasing the lock. Each pass therefore sees the runners the previous pass registered, so two reconciles do not launch for the same job. A holder that crashes keeps the lock only until 30 seconds past the reconciler's Lambda timeout. A job can still get a second runner in a narrow window: GitHub marks a runner busy a moment before the job's status changes, and a reconcile in between sees the job queued with no free runner. The spare runner serves the next queued job that fits it, or the janitor terminates it after `IdleMinutes`. One run launches all uncovered jobs in parallel, so a burst of queued jobs does not wait on a line of separate runs.
 
+The matching also shows which idle runners no queued job needs. A running one whose own job has started elsewhere, finished, or been cancelled is retired right away instead of idling until `IdleMinutes`, which matters for repositories whose CI cancels superseded runs.
+
 Runner names are `<stack>-<job id>-<launch time>`. The job ID shows which job the launch was for, and the launch time lets the janitor remove a registration that never got an instance.
 
 ### Alerts
@@ -167,7 +169,7 @@ Push a workflow with `runs-on: [ec2]`. In the GitHub App's Advanced tab, recent 
 | `GitHubOrg` | `example-org` | Org the app is installed on. Webhooks from other orgs are ignored. |
 | `TriggerLabel` | `ec2` | Label that opts a job in. |
 | `RunnerGroupId` | `1` | Org runner group for registrations. |
-| `IdleMinutes` | `20` | Kill an instance that has not started a job after this long. Covers runners left over when a job is cancelled. |
+| `IdleMinutes` | `20` | Kill an instance that has not started a job after this long. A backstop for runners the reconciler did not retire, such as one whose runner process failed to connect. |
 | `MaxMinutes` | `360` | Hard instance lifetime, enforced both by the boot script and the janitor. |
 | `AmiOwner`, `AmiNamePrefix` | RunsOn public images | Where `image=` names are looked up. |
 | `RunnerVersion` | `latest` | actions/runner version to download when the AMI does not have one at `/opt/ec2-runner`. The boot script checks the download against the SHA-256 digest GitHub publishes for the release asset, so the version must be 2.325.0 or later. |
@@ -182,7 +184,7 @@ Pass overrides as `./deploy.sh Key=Value …`.
 
 - A Spot interruption fails the job. GitHub does not retry it automatically. Mark interruption-sensitive jobs `spot=false`.
 - A job that stays queued longer than `IdleMinutes` while its runner sits idle loses that runner to the janitor, and the next reconcile launches another. Raise `IdleMinutes` if jobs often wait that long.
-- A job cancelled after its runner launched leaves that runner idle until the janitor terminates it after `IdleMinutes`. A queued job with matching labels can use it in the meantime.
+- When a job ends before it starts, for example when a newer push cancels it, the reconciler retires the runner launched for it: it deletes the registration, then terminates the instance. A runner that a queued job can still use is kept for that job. GitHub can assign a job to the runner in the moment between the reconciler's check and the deletion, which fails that job; this needs a job queued within that second, matching the runner's labels.
 - The boot script downloads the actions runner from GitHub on each boot, which adds a few seconds. Baking it into a custom AMI at `/opt/ec2-runner` skips the download.
 - The default AMIs are built and published by RunsOn. To use your own, build an AMI and set `AmiOwner` and `AmiNamePrefix`, or pass `image=ami-…`.
 - Linux only. Windows and GPU images would need GPU instance requirements and a PowerShell boot script.

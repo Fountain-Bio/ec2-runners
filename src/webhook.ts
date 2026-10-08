@@ -79,6 +79,12 @@ export async function webhook(event: LambdaFunctionURLEvent): Promise<APIGateway
     }
     case "completed":
       await jobs.markDone(job.id);
+      // A job cancelled before it started leaves the runner launched for it
+      // idle. The reconciler removes it unless another queued job needs it.
+      if (job.runner_name === null) {
+        await invokeReconciler(config.RECONCILER_FUNCTION, `job ${job.id} ended before it started`);
+        return { statusCode: 202, body: "reconciling" };
+      }
       return { statusCode: 200, body: "recorded completion" };
     default:
       return { statusCode: 200, body: `ignored ${payload.action}` };
