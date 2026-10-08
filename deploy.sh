@@ -43,7 +43,7 @@ aws cloudformation deploy \
   --region "$REGION" \
   --stack-name "$STACK" \
   --template-file .build/packaged.yaml \
-  --capabilities CAPABILITY_IAM \
+  --capabilities CAPABILITY_NAMED_IAM \
   --no-fail-on-empty-changeset \
   ${@:+--parameter-overrides "$@"}
 

@@ -71,6 +71,12 @@ Parameters:
       Slack workspace ID from the Amazon Q Developer in chat applications
       console, after authorizing the workspace there. Leave empty to skip Slack.
     Default: ""
+  OncallUserName:
+    Type: String
+    Description: >-
+      IAM user created with the stack's on-call read policy. Leave empty to
+      create only the policy, for example to attach it to an SSO role.
+    Default: oncall
   SlackChannelId:
     Type: String
     Description: >-
@@ -80,6 +86,7 @@ Parameters:
 
 Conditions:
   HasAlertEmail: !Not [!Equals [!Ref AlertEmail, ""]]
+  HasOncallUser: !Not [!Equals [!Ref OncallUserName, ""]]
   HasSlack: !And
     - !Not [!Equals [!Ref SlackWorkspaceId, ""]]
     - !Not [!Equals [!Ref SlackChannelId, ""]]
@@ -702,6 +709,102 @@ Resources:
       AlarmActions: [!Ref AlertTopic]
       OKActions: [!Ref AlertTopic]
 
+  # ---------- On-call access ----------
+  # Read access to everything this stack produces, for an on-call engineer or
+  # agent: function and boot logs, alarms, the jobs table, the runner
+  # instances, the functions, and the stack itself. It can also start a
+  # reconcile or janitor pass, both of which are safe to repeat. It cannot read
+  # the GitHub App secret's value or change any resource.
+  OncallPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: !Sub ${AWS::StackName}-oncall
+      Description: Read access to the ec2-runners stack's logs, alarms, jobs table, instances, and functions.
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: StackLogs
+            Effect: Allow
+            Action: [logs:FilterLogEvents, logs:GetLogEvents, logs:DescribeLogStreams, logs:StartQuery, logs:GetLogGroupFields]
+            Resource:
+              - !GetAtt WebhookLogs.Arn
+              - !GetAtt ReconcilerLogs.Arn
+              - !GetAtt JanitorLogs.Arn
+              - !GetAtt BootLogs.Arn
+          - Sid: LogQueries
+            Effect: Allow
+            Action: [logs:DescribeLogGroups, logs:GetQueryResults, logs:StopQuery, logs:DescribeQueries]
+            Resource: "*"
+          - Sid: AlarmsAndMetrics
+            Effect: Allow
+            Action: [cloudwatch:DescribeAlarms, cloudwatch:DescribeAlarmHistory, cloudwatch:GetMetricData, cloudwatch:GetMetricStatistics, cloudwatch:ListMetrics]
+            Resource: "*"
+          - Sid: JobsTable
+            Effect: Allow
+            Action: [dynamodb:DescribeTable, dynamodb:GetItem, dynamodb:Query, dynamodb:Scan]
+            Resource: !GetAtt JobsTable.Arn
+          - Sid: DescribeEc2
+            Effect: Allow
+            Action:
+              - ec2:DescribeInstances
+              - ec2:DescribeInstanceStatus
+              - ec2:DescribeSpotInstanceRequests
+              - ec2:DescribeImages
+              - ec2:DescribeLaunchTemplateVersions
+              - ec2:DescribeSubnets
+            Resource: "*"
+          - Sid: RunnerConsoleOutput
+            Effect: Allow
+            Action: ec2:GetConsoleOutput
+            Resource: "*"
+            Condition:
+              StringEquals:
+                aws:ResourceTag/ec2-runners:stack: !Ref AWS::StackName
+          - Sid: Functions
+            Effect: Allow
+            Action: [lambda:GetFunction, lambda:GetFunctionConfiguration, lambda:GetFunctionEventInvokeConfig]
+            Resource:
+              - !GetAtt WebhookFunction.Arn
+              - !GetAtt ReconcilerFunction.Arn
+              - !GetAtt JanitorFunction.Arn
+          - Sid: RunMaintenancePass
+            Effect: Allow
+            Action: lambda:InvokeFunction
+            Resource:
+              - !GetAtt ReconcilerFunction.Arn
+              - !GetAtt JanitorFunction.Arn
+          - Sid: Stack
+            Effect: Allow
+            Action:
+              - cloudformation:DescribeStacks
+              - cloudformation:DescribeStackEvents
+              - cloudformation:DescribeStackResource
+              - cloudformation:DescribeStackResources
+              - cloudformation:GetTemplate
+            Resource: !Ref AWS::StackId
+          - Sid: AlertTopic
+            Effect: Allow
+            Action: [sns:GetTopicAttributes, sns:ListSubscriptionsByTopic]
+            Resource: !Ref AlertTopic
+          - Sid: Schedule
+            Effect: Allow
+            Action: events:DescribeRule
+            Resource: !GetAtt MaintenanceSchedule.Arn
+          # Shows whether and when the app secret was set, without its value.
+          - Sid: SecretMetadata
+            Effect: Allow
+            Action: secretsmanager:DescribeSecret
+            Resource: !Ref GitHubAppSecret
+
+  # The template creates no access keys, so none appear in the stack's
+  # outputs or events. README, setup step 7 creates them.
+  OncallUser:
+    Type: AWS::IAM::User
+    Condition: HasOncallUser
+    Properties:
+      UserName: !Ref OncallUserName
+      ManagedPolicyArns: [!Ref OncallPolicy]
+
 Outputs:
   WebhookUrl:
     Description: Set this as the GitHub App webhook URL.
@@ -713,5 +816,8 @@ Outputs:
     Description: S3 bucket used by runs-on/cache and the BuildKit layer cache.
     Value: !Ref CacheBucket
   AlertTopicArn:
-    Description: SNS topic for alerts about jobs that cannot launch or keep failing to launch.
+    Description: SNS topic for the stack's alerts and alarms. See the README's Alerts section.
     Value: !Ref AlertTopic
+  OncallPolicyArn:
+    Description: Managed policy with read access to this stack's logs, alarms, jobs table, and instances.
+    Value: !Ref OncallPolicy
