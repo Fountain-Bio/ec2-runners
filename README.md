@@ -19,7 +19,14 @@ Runner names are `<stack>-<job id>-<launch time>`. The job ID shows which job th
 
 ### Alerts
 
-The `<stack>-alerts` SNS topic receives three kinds of alert. One is a job whose labels can never launch, such as `cpu=3` or an unknown image, sent once per job. Another is a job that has failed to launch three times, for example for lack of capacity. The reconciler keeps retrying that job every 5 minutes. The third is a reconciler run that failed after Lambda's two retries. A job that cannot launch stays queued in GitHub until it is cancelled or GitHub's 24-hour queue limit ends it.
+The `<stack>-alerts` SNS topic receives these alerts:
+
+- A job whose labels can never launch, such as `cpu=3` or an unknown image. Sent once per job.
+- A job that has failed to launch three times, for example for lack of capacity. The reconciler keeps retrying it every 5 minutes.
+- A job whose runners keep going unused. When two runners launched for a job sit idle until the janitor terminates them while the job is still queued, GitHub is not assigning the job to them. Usually the runner group does not allow the job's repository. The reconciler stops launching for that job.
+- A reconciler run that failed after Lambda's two retries.
+
+A job that cannot launch stays queued in GitHub until it is cancelled or GitHub's 24-hour queue limit ends it.
 
 The stack creates its own VPC with three public subnets and no NAT gateway. The runner security group has no inbound rules. An S3 gateway endpoint keeps cache traffic on the AWS network.
 

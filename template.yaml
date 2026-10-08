@@ -348,6 +348,10 @@ Resources:
               - Effect: Allow
                 Action: ec2:DeleteLaunchTemplateVersions
                 Resource: !Sub arn:${AWS::Partition}:ec2:${AWS::Region}:${AWS::AccountId}:launch-template/${RunnerLaunchTemplate}
+              # Counts idle runners against the job they were launched for.
+              - Effect: Allow
+                Action: dynamodb:UpdateItem
+                Resource: !GetAtt JobsTable.Arn
               - Effect: Allow
                 Action: ec2:TerminateInstances
                 Resource: "*"

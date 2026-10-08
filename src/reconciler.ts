@@ -33,6 +33,9 @@ const LAUNCH_CONCURRENCY = 8;
 // A job that fails to launch this many times, for example for lack of
 // capacity, triggers one alert. Later reconciles keep retrying it.
 const ALERT_AFTER_FAILURES = 3;
+// A job that still waits after this many of its runners sat idle until the
+// janitor terminated them is failed, since another runner would idle too.
+const MAX_IDLE_RUNNERS = 2;
 
 const ec2 = new EC2Client({});
 
@@ -90,6 +93,17 @@ async function reconcileJob(config: ReconcilerConfig, jobs: JobStore, gh: GitHub
   if (current.status === "in_progress" || current.status === "completed") {
     await jobs.markDone(job.jobId);
     return "already started";
+  }
+  if (job.idleRunners >= MAX_IDLE_RUNNERS) {
+    const reason =
+      `${job.idleRunners} runners launched for this job sat idle until they were terminated, and GitHub never assigned the job to them. ` +
+      `Either runner group ${config.RUNNER_GROUP_ID} does not allow ${job.repo} (or public repositories), ` +
+      `or the runners failed to connect (see /var/log/ec2-runner-boot.log on a new runner).`;
+    log("job never assigned to its runners", { jobId: job.jobId, repo: job.repo, idleRunners: job.idleRunners });
+    if (await jobs.markFailed(job.jobId, reason)) {
+      await alert(config.ALERT_TOPIC_ARN, `Runners for a job in ${job.repo} keep going unused`, `${current.html_url}\n\n${reason}`);
+    }
+    return "failed";
   }
 
   try {

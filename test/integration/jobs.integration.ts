@@ -78,7 +78,7 @@ const queuedIds = async () => (await store.listQueued()).map((j) => j.jobId).sor
 test("a queued job is listed and expires a day after it was queued", async () => {
   const now = Date.parse("2026-10-08T12:00:00Z");
   await store.markQueued(job(1, ["ec2", "cpu=4"]), now);
-  expect(await store.listQueued()).toContainEqual(job(1, ["ec2", "cpu=4"]));
+  expect(await store.listQueued()).toContainEqual({ ...job(1, ["ec2", "cpu=4"]), idleRunners: 0 });
   expect(await row(1)).toMatchObject({ status: "queued", launchFailures: 0, expiresAt: now / 1000 + 24 * 60 * 60 });
 });
 
@@ -116,6 +116,15 @@ test("recordLaunchFailure counts attempts and keeps the job queued", async () =>
   await store.markQueued(job(7));
   expect([await store.recordLaunchFailure(7), await store.recordLaunchFailure(7), await store.recordLaunchFailure(7)]).toEqual([1, 2, 3]);
   expect(await queuedIds()).toContain(7);
+});
+
+test("recordIdleRunner counts against an existing job only", async () => {
+  await store.markQueued(job(8));
+  await store.recordIdleRunner(8);
+  await store.recordIdleRunner(8);
+  expect((await store.listQueued()).find((j) => j.jobId === 8)?.idleRunners).toBe(2);
+  await store.recordIdleRunner(9);
+  expect(await row(9)).toBeUndefined();
 });
 
 test("listQueued reads every page of the table", async () => {

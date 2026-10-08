@@ -16,6 +16,9 @@ export interface QueuedJob {
   repo: string;
   runId: number;
   labels: string[];
+  // Runners launched for this job that the janitor terminated after they sat
+  // idle, with the job still queued.
+  idleRunners: number;
 }
 
 // The fields this module reads from a GitHub self-hosted runner registration.

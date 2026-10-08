@@ -6,6 +6,7 @@ import { EC2Client } from "@aws-sdk/client-ec2";
 import { github } from "./app-secret.ts";
 import { janitorConfig } from "./config.ts";
 import { ALL_STATES, deleteStaleLaunchTemplateVersions, listRunnerInstances, terminateInstances } from "./ec2.ts";
+import { jobStore } from "./jobs.ts";
 import { errorMessage, log } from "./log.ts";
 import { LAUNCH_GRACE_MS, parseRunnerName } from "./pool.ts";
 
@@ -26,6 +27,7 @@ export async function janitor(): Promise<{ terminated: string[]; removedRunners:
   const instances = allInstances.filter((i) => i.state === "pending" || i.state === "running");
 
   const toTerminate: string[] = [];
+  const idle: string[] = [];
   for (const inst of instances) {
     const age = now - inst.launchTime.getTime();
     const runner = inst.runnerName === undefined ? undefined : runnersByName.get(inst.runnerName);
@@ -34,10 +36,20 @@ export async function janitor(): Promise<{ terminated: string[]; removedRunners:
       log("terminating instance past max lifetime", { ...inst, ageMinutes: Math.round(age / 60_000) });
     } else if (age > idleMs && !runner?.busy) {
       toTerminate.push(inst.instanceId);
+      idle.push(inst.instanceId);
       log("terminating idle instance", { ...inst, ageMinutes: Math.round(age / 60_000), runnerStatus: runner?.status ?? "missing" });
     }
   }
   await terminateInstances(ec2, toTerminate);
+
+  // Counts each idle runner against the job it was launched for. The
+  // reconciler stops launching for a job whose runners keep going unused.
+  const jobs = jobStore(config.JOBS_TABLE);
+  for (const inst of instances.filter((i) => idle.includes(i.instanceId))) {
+    const jobId = parseRunnerName(config.RUNNER_PREFIX, inst.runnerName ?? "")?.jobId;
+    if (jobId === undefined) continue;
+    await jobs.recordIdleRunner(jobId).catch((e) => log("failed to record idle runner", { jobId, error: errorMessage(e) }));
+  }
 
   // A registration is stale when its instance has ended or was just
   // terminated, or when it never got an instance within the launch grace

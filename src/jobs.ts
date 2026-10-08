@@ -17,6 +17,7 @@ const QueuedRow = z.object({
   repo: z.string(),
   runId: z.int(),
   labels: z.array(z.string()),
+  idleRunners: z.int().default(0),
 });
 
 export class JobStore {
@@ -35,12 +36,12 @@ export class JobStore {
   // Adds a queued job. Does nothing when a row already exists, which covers a
   // redelivered webhook and a "queued" event that arrives after the job's
   // "in_progress" event.
-  async markQueued(job: QueuedJob, now = Date.now()): Promise<void> {
+  async markQueued(job: Omit<QueuedJob, "idleRunners">, now = Date.now()): Promise<void> {
     try {
       await this.doc.send(
         new PutCommand({
           TableName: this.table,
-          Item: { ...job, status: "queued", launchFailures: 0, expiresAt: this.expiresAt(now) },
+          Item: { ...job, status: "queued", launchFailures: 0, idleRunners: 0, expiresAt: this.expiresAt(now) },
           ConditionExpression: "attribute_not_exists(jobId)",
         }),
       );
@@ -98,6 +99,24 @@ export class JobStore {
       }),
     );
     return Number(res.Attributes?.launchFailures ?? 0);
+  }
+
+  // Counts a runner launched for this job that sat idle until the janitor
+  // terminated it. Does nothing for a job with no row.
+  async recordIdleRunner(jobId: number): Promise<void> {
+    try {
+      await this.doc.send(
+        new UpdateCommand({
+          TableName: this.table,
+          Key: { jobId },
+          UpdateExpression: "ADD idleRunners :one",
+          ConditionExpression: "attribute_exists(jobId)",
+          ExpressionAttributeValues: { ":one": 1 },
+        }),
+      );
+    } catch (err) {
+      if (!(err instanceof ConditionalCheckFailedException)) throw err;
+    }
   }
 
   // Reads with strong consistency, so a job the webhook queued just before

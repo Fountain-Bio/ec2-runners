@@ -86,6 +86,11 @@ Object.assign(DynamoDBDocumentClient.prototype, {
           table.set(row.jobId, row);
           return { Attributes: { launchFailures: row.launchFailures } };
         }
+        if (input.UpdateExpression.startsWith("ADD idleRunners")) {
+          if (!table.has(row.jobId)) throw conditionFailed();
+          row.idleRunners = (row.idleRunners ?? 0) + 1;
+          return {};
+        }
         if (input.ConditionExpression && row.status !== values[":queued"]) throw conditionFailed();
         row.status = values[":done"] ?? values[":failed"];
         if (values[":error"]) row.error = values[":error"];
@@ -194,8 +199,8 @@ function ec2With({ instances = [] as object[], instanceTypes = ["c7a.xlarge"], f
   };
 }
 
-const queuedRow = (jobId: number, labels: string[], repo = "example-org/app") =>
-  table.set(jobId, { jobId, repo, runId: 777, labels, status: "queued", launchFailures: 0 });
+const queuedRow = (jobId: number, labels: string[], { repo = "example-org/app", idleRunners = 0 } = {}) =>
+  table.set(jobId, { jobId, repo, runId: 777, labels, status: "queued", launchFailures: 0, idleRunners });
 
 const { webhook, reconciler, janitor } = await import("../src/index.ts");
 
@@ -396,6 +401,15 @@ test("reconciler fails a job whose labels no instance type matches, and alerts o
   expect(alerts()).toHaveLength(1);
 });
 
+test("reconciler fails a job after two of its runners went unused, and alerts once", async () => {
+  queuedRow(558, ["ec2"], { idleRunners: 2 });
+  githubJob("example-org/app", 558);
+  expect((await reconciler()).outcomes).toEqual({ 558: "failed" });
+  expect(table.get(558)).toMatchObject({ status: "failed", error: expect.stringContaining("runner group 1") });
+  expect(alerts()).toHaveLength(1);
+  expect(fleetCalls()).toHaveLength(0);
+});
+
 test("reconciler retries a launch that lacks capacity and alerts on the third failure", async () => {
   queuedRow(557, ["ec2"]);
   githubJob("example-org/app", 557);
@@ -463,8 +477,13 @@ test("janitor terminates idle and expired instances and removes stale registrati
   };
   for (const id of [3, 5, 7]) ghRoutes[`DELETE /orgs/example-org/actions/runners/${id}`] = { status: 204 };
 
+  queuedRow(3, ["ec2"]);
+  queuedRow(4, ["ec2"]);
   const result = await janitor();
   expect(result.terminated.sort()).toEqual(["i-idle", "i-old"]);
+  // Only the idle runner counts against its job; i-old was busy past its lifetime.
+  expect(table.get(3)?.idleRunners).toBe(1);
+  expect(table.get(4)?.idleRunners).toBe(0);
   expect(result.removedRunners.sort()).toEqual([idle, gone, orphaned].sort());
   expect(result.deletedVersions).toEqual(["9"]);
   const terminate = awsCalls.find((c) => c.name === "TerminateInstancesCommand")!;
