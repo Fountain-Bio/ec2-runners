@@ -10,7 +10,6 @@ import { alert } from "./alerts.ts";
 import { github } from "./app-secret.ts";
 import { reconcilerConfig, type ReconcilerConfig } from "./config.ts";
 import {
-  ALL_STATES,
   assertInstanceTypesExist,
   launchRunner,
   listRunnerInstances,
@@ -36,8 +35,9 @@ const MAX_IDLE_RUNNERS = 2;
 // reconciler starts no launch with less than this much time left before its
 // Lambda timeout, so a timeout never cuts a launch off partway.
 const LAUNCH_TIME_BUDGET_MS = 2 * 60_000;
-// How often the reconciler rereads the runner group's public-repository setting.
-const RUNNER_GROUP_CHECK_MS = 60 * 60_000;
+// How long the reconciler caches the runner group's public-repository
+// setting and the runner tarball lookup.
+const CACHE_MS = 60 * 60_000;
 
 const ec2 = new EC2Client({});
 
@@ -57,7 +57,7 @@ export async function reconciler(
   const [queued, registrations, instances] = await Promise.all([
     jobs.listQueued(),
     gh.listRunners(`${config.RUNNER_PREFIX}-`),
-    listRunnerInstances(ec2, config.RUNNER_PREFIX, ALL_STATES),
+    listRunnerInstances(ec2, config.RUNNER_PREFIX),
   ]);
   const available = availableRunners({ prefix: config.RUNNER_PREFIX, registrations, instances, now, graceMs: LAUNCH_GRACE_MS });
   const uncovered = unmatchedJobs(queued, available);
@@ -90,7 +90,7 @@ let privateGroupCheckedAt: number | undefined;
 let alertedPublicGroup = false;
 async function runnerGroupIsPrivate(config: ReconcilerConfig, gh: GitHubClient, now: number): Promise<boolean> {
   if (config.ALLOW_PUBLIC_REPOS) return true;
-  if (privateGroupCheckedAt !== undefined && now - privateGroupCheckedAt < RUNNER_GROUP_CHECK_MS) return true;
+  if (privateGroupCheckedAt !== undefined && now - privateGroupCheckedAt < CACHE_MS) return true;
   const allowsPublic = await gh.runnerGroupAllowsPublicRepos(config.RUNNER_GROUP_ID);
   if (allowsPublic !== true) {
     privateGroupCheckedAt = now;
@@ -215,12 +215,12 @@ async function launchForJob(config: ReconcilerConfig, gh: GitHubClient, job: Que
   }
 }
 
-// The runner tarball for each AMI architecture, looked up at most hourly.
+// The runner tarball for each AMI architecture.
 const downloads = new Map<string, { download: RunnerDownload; at: number }>();
 async function runnerDownload(config: ReconcilerConfig, gh: GitHubClient, ami: Ami): Promise<RunnerDownload> {
   const arch = ami.architecture === "arm64" ? "arm64" : "x64";
   const cached = downloads.get(arch);
-  if (cached && Date.now() - cached.at < 60 * 60_000) return cached.download;
+  if (cached && Date.now() - cached.at < CACHE_MS) return cached.download;
   const download = await gh.runnerDownload(config.RUNNER_VERSION, arch);
   downloads.set(arch, { download, at: Date.now() });
   return download;

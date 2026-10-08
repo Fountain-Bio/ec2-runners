@@ -23,8 +23,6 @@ const TAG_RUNNER = "ec2-runners:runner-name";
 const TAG_REPO = "ec2-runners:repo";
 const TAG_RUN = "ec2-runners:run-id";
 
-// Every EC2 instance state. The janitor looks at all of them.
-export const ALL_STATES = ["pending", "running", "shutting-down", "stopping", "stopped", "terminated"];
 
 // The send() method is all this module needs from EC2Client, so tests can pass
 // a plain object in its place.
@@ -143,7 +141,7 @@ export function shuffled<T>(items: readonly T[], random: () => number = Math.ran
 export interface LaunchOptions {
   launchTemplateId: string;
   // The stack's base launch template version that each per-launch version copies.
-  sourceVersion: string | number;
+  sourceVersion: string;
   subnetIds: string[];
   spec: LaunchSpec;
   ami: Ami;
@@ -181,7 +179,7 @@ export async function launchRunner(ec2: Ec2, opts: LaunchOptions): Promise<Launc
   const { LaunchTemplateVersion } = await ec2.send(
     new CreateLaunchTemplateVersionCommand({
       LaunchTemplateId: launchTemplateId,
-      SourceVersion: String(sourceVersion),
+      SourceVersion: sourceVersion,
       // deleteStaleLaunchTemplateVersions recognizes per-launch versions by this.
       VersionDescription: runnerName,
       LaunchTemplateData: {
@@ -190,7 +188,7 @@ export async function launchRunner(ec2: Ec2, opts: LaunchOptions): Promise<Launc
         BlockDeviceMappings: [
           {
             DeviceName: ami.rootDeviceName,
-            Ebs: { VolumeSize: Math.max(spec.disk, ami.snapshotSizeGiB ?? 0), VolumeType: "gp3", DeleteOnTermination: true, Encrypted: true },
+            Ebs: { VolumeSize: Math.max(spec.disk, ami.snapshotSizeGiB), VolumeType: "gp3", DeleteOnTermination: true, Encrypted: true },
           },
         ],
         TagSpecifications: [
@@ -241,11 +239,10 @@ export interface RunnerInstance {
   runnerName: string | undefined;
 }
 
-export async function listRunnerInstances(
-  ec2: Ec2,
-  stackName: string,
-  states: string[] = ["pending", "running"],
-): Promise<RunnerInstance[]> {
+// Lists the stack's instances in every state. Ended instances stay listed for
+// about an hour after they terminate, which is how the janitor tells a
+// registration whose instance ended from one whose launch is in progress.
+export async function listRunnerInstances(ec2: Ec2, stackName: string): Promise<RunnerInstance[]> {
   const instances: RunnerInstance[] = [];
   let NextToken: string | undefined;
   do {
@@ -253,7 +250,6 @@ export async function listRunnerInstances(
       new DescribeInstancesCommand({
         Filters: [
           { Name: `tag:${TAG_STACK}`, Values: [stackName] },
-          { Name: "instance-state-name", Values: states },
         ],
         NextToken,
       }),

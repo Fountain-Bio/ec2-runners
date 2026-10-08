@@ -5,10 +5,17 @@
 import { EC2Client } from "@aws-sdk/client-ec2";
 import { github } from "./app-secret.ts";
 import { janitorConfig } from "./config.ts";
-import { ALL_STATES, deleteStaleLaunchTemplateVersions, listRunnerInstances, terminateInstances } from "./ec2.ts";
+import { deleteStaleLaunchTemplateVersions, listRunnerInstances, terminateInstances } from "./ec2.ts";
 import { jobStore } from "./jobs.ts";
 import { errorMessage, log } from "./log.ts";
 import { LAUNCH_GRACE_MS, classifyRunners, parseRunnerName } from "./pool.ts";
+
+// The boot script powers an instance off at MaxMinutes. The janitor waits this
+// much longer before terminating it, so the script's own shutdown runs first.
+const LIFETIME_GRACE_MS = 5 * 60_000;
+// A launch finishes within the reconciler's 5 minute timeout, so a per-launch
+// launch template version this old is unused.
+const STALE_VERSION_AGE_MS = 60 * 60_000;
 
 const ec2 = new EC2Client({});
 
@@ -16,11 +23,11 @@ export async function janitor(): Promise<{ terminated: string[]; removedRunners:
   const config = janitorConfig();
   const now = Date.now();
   const idleMs = config.IDLE_MINUTES * 60_000;
-  const maxMs = (config.MAX_MINUTES + 5) * 60_000;
+  const maxMs = config.MAX_MINUTES * 60_000 + LIFETIME_GRACE_MS;
   const gh = await github(config);
 
   const [allInstances, runners] = await Promise.all([
-    listRunnerInstances(ec2, config.RUNNER_PREFIX, ALL_STATES),
+    listRunnerInstances(ec2, config.RUNNER_PREFIX),
     gh.listRunners(`${config.RUNNER_PREFIX}-`),
   ]);
   const runnersByName = new Map(runners.map((r) => [r.name, r]));
@@ -60,12 +67,10 @@ export async function janitor(): Promise<{ terminated: string[]; removedRunners:
     await gh.deleteRunner(r.id).catch((e) => log("failed to delete stale runner", { name: r.name, error: errorMessage(e) }));
   }
 
-  // A launch finishes within the reconciler's 5 minute timeout, so an
-  // hour-old version is unused.
   const deletedVersions = await deleteStaleLaunchTemplateVersions(ec2, {
     launchTemplateId: config.LAUNCH_TEMPLATE_ID,
     runnerPrefix: config.RUNNER_PREFIX,
-    maxAgeMs: 60 * 60_000,
+    maxAgeMs: STALE_VERSION_AGE_MS,
     now,
   }).catch((e) => {
     log("failed to delete stale launch template versions", { error: errorMessage(e) });

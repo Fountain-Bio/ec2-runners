@@ -139,7 +139,7 @@ const ami: Ami = { imageId: "ami-abc", architecture: "x86_64", rootDeviceName: "
 
 const launchOpts = (launchSpec: LaunchSpec): LaunchOptions => ({
   launchTemplateId: "lt-123",
-  sourceVersion: 1,
+  sourceVersion: "1",
   random: () => 0.999, // keeps subnet order unchanged
   subnetIds: ["subnet-a", "subnet-b"],
   spec: launchSpec,
