@@ -1,0 +1,434 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  Ephemeral GitHub Actions runners on EC2 Spot. A GitHub App webhook hits a
+  Lambda function URL, which launches one fresh instance per job; the instance
+  runs the job and terminates itself. Includes an S3 bucket for runs-on/cache.
+
+Parameters:
+  GitHubOrg:
+    Type: String
+    Description: GitHub organization the GitHub App is installed on.
+    Default: example-org
+  TriggerLabel:
+    Type: String
+    Description: Jobs whose runs-on labels include this label get an EC2 runner.
+    Default: ec2
+  RunnerGroupId:
+    Type: Number
+    Description: Organization runner group ID. The Default group has ID 1.
+    Default: 1
+  IdleMinutes:
+    Type: Number
+    Description: Terminate an instance whose runner has not started a job after this many minutes.
+    Default: 20
+    MinValue: 5
+  MaxMinutes:
+    Type: Number
+    Description: Hard limit on instance lifetime in minutes. Jobs running longer are killed.
+    Default: 360
+    MinValue: 10
+  AmiOwner:
+    Type: String
+    Description: Owner account of the runner AMIs. The default is the public RunsOn runner images.
+    Default: "135269210855"
+  AmiNamePrefix:
+    Type: String
+    Description: AMI name prefix. The image label is appended, then "-*".
+    Default: runs-on-v2.2-
+  RunnerVersion:
+    Type: String
+    Description: actions/runner version to install when the AMI has none, or "latest".
+    Default: latest
+  CacheRetentionDays:
+    Type: Number
+    Description: Days to keep objects in the cache bucket.
+    Default: 10
+  VpcCidr:
+    Type: String
+    Description: CIDR block for the runner VPC. Split into three public /20 subnets.
+    Default: 10.42.0.0/16
+
+Resources:
+  # ---------- Network: public subnets, no NAT, no inbound access ----------
+  Vpc:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: !Ref VpcCidr
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags: [{ Key: Name, Value: !Ref AWS::StackName }]
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags: [{ Key: Name, Value: !Ref AWS::StackName }]
+
+  GatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref Vpc
+      InternetGatewayId: !Ref InternetGateway
+
+  RouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref Vpc
+      Tags: [{ Key: Name, Value: !Ref AWS::StackName }]
+
+  DefaultRoute:
+    Type: AWS::EC2::Route
+    DependsOn: GatewayAttachment
+    Properties:
+      RouteTableId: !Ref RouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  SubnetA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      AvailabilityZone: !Select [0, !GetAZs ""]
+      CidrBlock: !Select [0, !Cidr [!Ref VpcCidr, 3, 12]]
+      MapPublicIpOnLaunch: true
+      Tags: [{ Key: Name, Value: !Sub "${AWS::StackName}-a" }]
+
+  SubnetB:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      AvailabilityZone: !Select [1, !GetAZs ""]
+      CidrBlock: !Select [1, !Cidr [!Ref VpcCidr, 3, 12]]
+      MapPublicIpOnLaunch: true
+      Tags: [{ Key: Name, Value: !Sub "${AWS::StackName}-b" }]
+
+  SubnetC:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      AvailabilityZone: !Select [2, !GetAZs ""]
+      CidrBlock: !Select [2, !Cidr [!Ref VpcCidr, 3, 12]]
+      MapPublicIpOnLaunch: true
+      Tags: [{ Key: Name, Value: !Sub "${AWS::StackName}-c" }]
+
+  SubnetARoutes:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties: { SubnetId: !Ref SubnetA, RouteTableId: !Ref RouteTable }
+  SubnetBRoutes:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties: { SubnetId: !Ref SubnetB, RouteTableId: !Ref RouteTable }
+  SubnetCRoutes:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties: { SubnetId: !Ref SubnetC, RouteTableId: !Ref RouteTable }
+
+  # Keeps cache traffic on the AWS network. Gateway endpoints are free.
+  S3Endpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref Vpc
+      ServiceName: !Sub com.amazonaws.${AWS::Region}.s3
+      VpcEndpointType: Gateway
+      RouteTableIds: [!Ref RouteTable]
+
+  RunnerSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: GitHub Actions runners. Outbound only.
+      VpcId: !Ref Vpc
+      SecurityGroupEgress:
+        - IpProtocol: "-1"
+          CidrIp: 0.0.0.0/0
+      Tags: [{ Key: Name, Value: !Ref AWS::StackName }]
+
+  # ---------- Cache ----------
+  CacheBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault: { SSEAlgorithm: AES256 }
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      OwnershipControls:
+        Rules: [{ ObjectOwnership: BucketOwnerEnforced }]
+      LifecycleConfiguration:
+        Rules:
+          - Id: expire-cache
+            Status: Enabled
+            ExpirationInDays: !Ref CacheRetentionDays
+            AbortIncompleteMultipartUpload: { DaysAfterInitiation: 1 }
+
+  # ---------- Runner instances ----------
+  RunnerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: ec2.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        # Allows shell access through Session Manager for debugging a stuck runner.
+        - !Sub arn:${AWS::Partition}:iam::aws:policy/AmazonSSMManagedInstanceCore
+      Policies:
+        - PolicyName: cache-bucket
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: [s3:GetObject, s3:PutObject, s3:DeleteObject, s3:AbortMultipartUpload]
+                Resource: !Sub ${CacheBucket.Arn}/*
+              - Effect: Allow
+                Action: [s3:ListBucket]
+                Resource: !GetAtt CacheBucket.Arn
+
+  RunnerInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles: [!Ref RunnerRole]
+
+  # Base settings for every runner. The launcher adds a version per launch
+  # carrying the AMI, disk size, tags, and user data.
+  RunnerLaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateName: !Sub ${AWS::StackName}-runner
+      LaunchTemplateData:
+        IamInstanceProfile: { Arn: !GetAtt RunnerInstanceProfile.Arn }
+        SecurityGroupIds: [!Ref RunnerSecurityGroup]
+        InstanceInitiatedShutdownBehavior: terminate
+        MetadataOptions:
+          HttpTokens: required
+          # 2 lets Docker containers in the job reach the instance credentials.
+          HttpPutResponseHopLimit: 2
+          HttpEndpoint: enabled
+
+  # ---------- Control plane ----------
+  GitHubAppSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: !Sub ${AWS::StackName}/github-app
+      Description: GitHub App credentials. Set appId, privateKey (PEM), and webhookSecret after deploying.
+      SecretString: '{"appId":"REPLACE_ME","privateKey":"REPLACE_ME","webhookSecret":"REPLACE_ME"}'
+
+  ControlPlaneRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: lambda.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Sub arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: control-plane
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: secretsmanager:GetSecretValue
+                Resource: !Ref GitHubAppSecret
+              - Effect: Allow
+                Action: lambda:InvokeFunction
+                Resource: !Sub arn:${AWS::Partition}:lambda:${AWS::Region}:${AWS::AccountId}:function:${AWS::StackName}-launcher
+              - Effect: Allow
+                Action: [ec2:CreateLaunchTemplateVersion, ec2:DeleteLaunchTemplateVersions]
+                Resource: !Sub arn:${AWS::Partition}:ec2:${AWS::Region}:${AWS::AccountId}:launch-template/${RunnerLaunchTemplate}
+              - Effect: Allow
+                Action:
+                  - ec2:CreateFleet
+                  - ec2:RunInstances
+                  - ec2:CreateTags
+                  - ec2:DescribeImages
+                  - ec2:DescribeInstances
+                  - ec2:DescribeInstanceTypes
+                  - ec2:DescribeLaunchTemplates
+                  - ec2:DescribeLaunchTemplateVersions
+                  - ec2:DescribeSubnets
+                  - ec2:GetInstanceTypesFromInstanceRequirements
+                Resource: "*"
+              - Effect: Allow
+                Action: ec2:TerminateInstances
+                Resource: "*"
+                Condition:
+                  StringEquals:
+                    aws:ResourceTag/ec2-runners:stack: !Ref AWS::StackName
+              - Effect: Allow
+                Action: iam:PassRole
+                Resource: !GetAtt RunnerRole.Arn
+              - Effect: Allow
+                Action: iam:CreateServiceLinkedRole
+                Resource: "*"
+                Condition:
+                  StringEquals:
+                    iam:AWSServiceName: [spot.amazonaws.com, ec2fleet.amazonaws.com]
+
+  WebhookLogs:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/lambda/${AWS::StackName}-webhook
+      RetentionInDays: 14
+  LauncherLogs:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/lambda/${AWS::StackName}-launcher
+      RetentionInDays: 14
+  JanitorLogs:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/lambda/${AWS::StackName}-janitor
+      RetentionInDays: 14
+
+  WebhookFunction:
+    Type: AWS::Lambda::Function
+    DependsOn: WebhookLogs
+    Properties:
+      FunctionName: !Sub ${AWS::StackName}-webhook
+      Runtime: nodejs24.x
+      Architectures: [arm64]
+      Handler: index.webhook
+      Code: ./src
+      Role: !GetAtt ControlPlaneRole.Arn
+      Timeout: 10
+      MemorySize: 256
+      Environment:
+        Variables:
+          SECRET_ARN: !Ref GitHubAppSecret
+          GITHUB_ORG: !Ref GitHubOrg
+          TRIGGER_LABEL: !Ref TriggerLabel
+          RUNNER_GROUP_ID: !Ref RunnerGroupId
+          RUNNER_PREFIX: !Ref AWS::StackName
+          LAUNCHER_FUNCTION: !Sub ${AWS::StackName}-launcher
+          LAUNCH_TEMPLATE_ID: !Ref RunnerLaunchTemplate
+          LAUNCH_TEMPLATE_VERSION: !GetAtt RunnerLaunchTemplate.DefaultVersionNumber
+          SUBNET_IDS: !Join [",", [!Ref SubnetA, !Ref SubnetB, !Ref SubnetC]]
+          CACHE_BUCKET: !Ref CacheBucket
+          IDLE_MINUTES: !Ref IdleMinutes
+          MAX_MINUTES: !Ref MaxMinutes
+          AMI_OWNER: !Ref AmiOwner
+          AMI_NAME_PREFIX: !Ref AmiNamePrefix
+          RUNNER_VERSION: !Ref RunnerVersion
+
+  WebhookUrl:
+    Type: AWS::Lambda::Url
+    Properties:
+      TargetFunctionArn: !GetAtt WebhookFunction.Arn
+      AuthType: NONE
+
+  # Public function URLs need both permissions. Requests are authenticated
+  # inside the function by the GitHub webhook HMAC signature.
+  WebhookUrlPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref WebhookFunction
+      Action: lambda:InvokeFunctionUrl
+      Principal: "*"
+      FunctionUrlAuthType: NONE
+  WebhookInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref WebhookFunction
+      Action: lambda:InvokeFunction
+      Principal: "*"
+      InvokedViaFunctionUrl: true
+
+  LauncherFunction:
+    Type: AWS::Lambda::Function
+    DependsOn: LauncherLogs
+    Properties:
+      FunctionName: !Sub ${AWS::StackName}-launcher
+      Runtime: nodejs24.x
+      Architectures: [arm64]
+      Handler: index.launcher
+      Code: ./src
+      Role: !GetAtt ControlPlaneRole.Arn
+      Timeout: 60
+      MemorySize: 256
+      Environment:
+        Variables:
+          SECRET_ARN: !Ref GitHubAppSecret
+          GITHUB_ORG: !Ref GitHubOrg
+          TRIGGER_LABEL: !Ref TriggerLabel
+          RUNNER_GROUP_ID: !Ref RunnerGroupId
+          RUNNER_PREFIX: !Ref AWS::StackName
+          LAUNCHER_FUNCTION: !Sub ${AWS::StackName}-launcher
+          LAUNCH_TEMPLATE_ID: !Ref RunnerLaunchTemplate
+          LAUNCH_TEMPLATE_VERSION: !GetAtt RunnerLaunchTemplate.DefaultVersionNumber
+          SUBNET_IDS: !Join [",", [!Ref SubnetA, !Ref SubnetB, !Ref SubnetC]]
+          CACHE_BUCKET: !Ref CacheBucket
+          IDLE_MINUTES: !Ref IdleMinutes
+          MAX_MINUTES: !Ref MaxMinutes
+          AMI_OWNER: !Ref AmiOwner
+          AMI_NAME_PREFIX: !Ref AmiNamePrefix
+          RUNNER_VERSION: !Ref RunnerVersion
+
+  LauncherAsyncConfig:
+    Type: AWS::Lambda::EventInvokeConfig
+    Properties:
+      FunctionName: !Ref LauncherFunction
+      Qualifier: $LATEST
+      MaximumRetryAttempts: 2
+      MaximumEventAgeInSeconds: 900
+
+  JanitorFunction:
+    Type: AWS::Lambda::Function
+    DependsOn: JanitorLogs
+    Properties:
+      FunctionName: !Sub ${AWS::StackName}-janitor
+      Runtime: nodejs24.x
+      Architectures: [arm64]
+      Handler: index.janitor
+      Code: ./src
+      Role: !GetAtt ControlPlaneRole.Arn
+      Timeout: 120
+      MemorySize: 256
+      Environment:
+        Variables:
+          SECRET_ARN: !Ref GitHubAppSecret
+          GITHUB_ORG: !Ref GitHubOrg
+          TRIGGER_LABEL: !Ref TriggerLabel
+          RUNNER_GROUP_ID: !Ref RunnerGroupId
+          RUNNER_PREFIX: !Ref AWS::StackName
+          LAUNCHER_FUNCTION: !Sub ${AWS::StackName}-launcher
+          LAUNCH_TEMPLATE_ID: !Ref RunnerLaunchTemplate
+          LAUNCH_TEMPLATE_VERSION: !GetAtt RunnerLaunchTemplate.DefaultVersionNumber
+          SUBNET_IDS: !Join [",", [!Ref SubnetA, !Ref SubnetB, !Ref SubnetC]]
+          CACHE_BUCKET: !Ref CacheBucket
+          IDLE_MINUTES: !Ref IdleMinutes
+          MAX_MINUTES: !Ref MaxMinutes
+          AMI_OWNER: !Ref AmiOwner
+          AMI_NAME_PREFIX: !Ref AmiNamePrefix
+          RUNNER_VERSION: !Ref RunnerVersion
+
+  JanitorSchedule:
+    Type: AWS::Events::Rule
+    Properties:
+      ScheduleExpression: rate(5 minutes)
+      State: ENABLED
+      Targets:
+        - Id: janitor
+          Arn: !GetAtt JanitorFunction.Arn
+
+  JanitorSchedulePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref JanitorFunction
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt JanitorSchedule.Arn
+
+Outputs:
+  WebhookUrl:
+    Description: Set this as the GitHub App webhook URL.
+    Value: !GetAtt WebhookUrl.FunctionUrl
+  GitHubAppSecretArn:
+    Description: Put the GitHub App ID, private key, and webhook secret in this secret.
+    Value: !Ref GitHubAppSecret
+  CacheBucket:
+    Description: S3 bucket used by runs-on/cache and the BuildKit layer cache.
+    Value: !Ref CacheBucket

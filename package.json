@@ -1,0 +1,15 @@
+{
+  "name": "ec2-runners",
+  "private": true,
+  "type": "module",
+  "description": "Ephemeral GitHub Actions runners on EC2 Spot, deployed as one CloudFormation stack.",
+  "scripts": {
+    "test": "node --test test/*.test.mjs",
+    "lint:template": "cfn-lint template.yaml --ignore-checks W3002"
+  },
+  "devDependencies": {
+    "@aws-sdk/client-ec2": "^3.0.0",
+    "@aws-sdk/client-lambda": "^3.0.0",
+    "@aws-sdk/client-secrets-manager": "^3.0.0"
+  }
+}
