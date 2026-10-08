@@ -104,10 +104,10 @@ Requirements: AWS CLI v2 with admin credentials for the target account, [Bun](ht
 ### 1. Deploy the stack
 
 ```bash
-AWS_REGION=us-west-2 ./deploy.sh AlertEmail=you@example.com
+AWS_PROFILE=dev ./deploy.sh AlertEmail=you@example.com
 ```
 
-The script creates an artifact bucket for the Lambda zip on first run, then bundles the code, packages, and deploys. The `runs-on-v2.2-*` AMIs are published in us-east-1, us-east-2, us-west-2, eu-west-1, eu-west-2, eu-west-3, eu-central-1, ap-south-1, ap-northeast-1, ap-southeast-1, and ap-southeast-2. The stack prints `WebhookUrl`, `GitHubAppSecretArn`, `CacheBucket`, and `AlertTopicArn`. With `AlertEmail` set, SNS emails a subscription confirmation that must be accepted before alerts arrive.
+The script deploys to us-west-2 unless `AWS_REGION` is set. It creates an artifact bucket for the Lambda zip on first run, then bundles the code, packages, and deploys. The region needs three availability zones, and the `runs-on-v2.2-*` AMIs are published in us-east-1, us-east-2, us-west-2, eu-west-1, eu-west-2, eu-west-3, eu-central-1, ap-south-1, ap-northeast-1, ap-southeast-1, and ap-southeast-2. The stack prints `WebhookUrl`, `GitHubAppSecretArn`, `CacheBucket`, and `AlertTopicArn`. With `AlertEmail` set, SNS emails a subscription confirmation that must be accepted before alerts arrive.
 
 ### 2. Create the GitHub App
 

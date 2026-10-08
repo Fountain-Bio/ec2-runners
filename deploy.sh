@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Bundles the Lambda code and deploys the stack. Needs bun and the AWS CLI.
 #
-#   ./deploy.sh                      # stack "ec2-runners" in the current AWS region
+#   ./deploy.sh                      # stack "ec2-runners" in us-west-2, or AWS_REGION when set
 #   STACK=ci-runners ./deploy.sh GitHubOrg=example-org IdleMinutes=15
 #
 # Extra arguments are passed as parameter overrides.
@@ -9,7 +9,9 @@ set -euo pipefail
 cd "$(dirname "$0")"
 
 STACK="${STACK:-ec2-runners}"
-REGION="${AWS_REGION:-$(aws configure get region)}"
+# us-west-2 has the three availability zones the template uses and the
+# RunsOn runner AMIs. Set AWS_REGION to deploy elsewhere.
+REGION="${AWS_REGION:-us-west-2}"
 ACCOUNT="$(aws sts get-caller-identity --query Account --output text)"
 ARTIFACTS="${ARTIFACTS_BUCKET:-${STACK}-artifacts-${ACCOUNT}-${REGION}}"
 
