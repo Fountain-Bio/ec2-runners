@@ -12,14 +12,14 @@ jobs:
     runs-on: [ec2, cpu=2]
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v7.0.1
 
-      - uses: oven-sh/setup-bun@v2
+      - uses: oven-sh/setup-bun@v2.2.0
         with:
           bun-version: 1.4.2
 
       # Runs cfn-lint for `bun run lint:template`.
-      - uses: astral-sh/setup-uv@v10
+      - uses: astral-sh/setup-uv@v10.2.0
 
       - run: bun install --frozen-lockfile
       - run: bun run typecheck
