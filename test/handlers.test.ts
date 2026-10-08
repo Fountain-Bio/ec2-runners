@@ -39,6 +39,7 @@ Object.assign(process.env, {
   AMI_OWNER: "135269210855",
   AMI_NAME_PREFIX: "runs-on-v2.2-",
   RUNNER_VERSION: "latest",
+  RECONCILE_RETRY_SECONDS: "0",
   BOOT_LOG_GROUP: "/ec2-runners/ec2-runners/boot",
   ALLOW_PUBLIC_REPOS: "false",
 });
@@ -111,15 +112,31 @@ Object.assign(DynamoDBDocumentClient.prototype, {
 type Route = { status?: number; body?: unknown };
 let ghCalls: { key: string; search: string; body: any }[] = [];
 let ghRoutes: Record<string, Route> = {};
+// Runners registered through generate-jitconfig and not yet deleted. The
+// runner list reports them, as GitHub does, so a later reconcile pass sees the
+// runners an earlier pass registered.
+type Registered = { id: number; name: string; busy: boolean; status: string; labels: { name: string }[] };
+let registered: Registered[] = [];
 Object.assign(globalThis, {
   fetch: async (url: string, init: RequestInit = {}) => {
     const { pathname, search } = new URL(url);
     const key = `${init.method ?? "GET"} ${pathname}`;
-    ghCalls.push({ key, search, body: init.body ? JSON.parse(String(init.body)) : undefined });
+    const body = init.body ? JSON.parse(String(init.body)) : undefined;
+    ghCalls.push({ key, search, body });
     const route = ghRoutes[key];
+    const status = route?.status ?? 200;
+    let responseBody = route?.body as any;
+    if (key === "POST /orgs/example-org/actions/runners/generate-jitconfig" && status === 201) {
+      registered.push({ id: responseBody.runner.id, name: body.name, busy: false, status: "offline", labels: body.labels.map((name: string) => ({ name })) });
+    }
+    const deleted = /^DELETE \/orgs\/example-org\/actions\/runners\/(\d+)$/.exec(key);
+    if (deleted && status === 204) registered = registered.filter((r) => r.id !== Number(deleted[1]));
+    if (key === "GET /orgs/example-org/actions/runners" && responseBody) {
+      responseBody = { ...responseBody, runners: [...responseBody.runners, ...registered] };
+    }
     const res = route
-      ? new Response(route.status === 204 ? null : JSON.stringify(route.body), {
-          status: route.status ?? 200,
+      ? new Response(status === 204 ? null : JSON.stringify(responseBody), {
+          status,
           headers: { "content-type": "application/json" },
         })
       : new Response(JSON.stringify({ message: `no route for ${key}` }), { status: 500, headers: { "content-type": "application/json" } });
@@ -219,6 +236,7 @@ beforeEach(() => {
   awsCalls = [];
   ghCalls = [];
   ghRoutes = baseRoutes();
+  registered = [];
   ec2Handler = ec2With();
   table = new Map();
 });
@@ -450,7 +468,8 @@ test("reconciler marks done a job GitHub already started", async () => {
 });
 
 test("reconciler keeps launching other jobs when one job's GitHub lookup fails", async () => {
-  queuedRow(555, ["ec2"]);
+  // Job 555 asks for more than job 556's runner offers, so that runner never covers it.
+  queuedRow(555, ["ec2", "cpu=4"]);
   queuedRow(556, ["ec2"]);
   queuedRow(557, ["ec2"]);
   githubJob("example-org/app", 556);
@@ -458,7 +477,9 @@ test("reconciler keeps launching other jobs when one job's GitHub lookup fails",
   ghRoutes["GET /repos/example-org/app/actions/jobs/557"] = { status: 404, body: { message: "Not Found" } };
 
   const result = await reconciler();
-  expect(result.outcomes).toEqual({ 555: "error", 556: "launched", 557: "gone" });
+  // Job 556 launched in the first pass; later passes retried only job 555.
+  expect(result.outcomes).toEqual({ 555: "error" });
+  expect(ghCalls.filter((c) => c.key.endsWith("generate-jitconfig")).map((c) => c.body.name)).toEqual([expect.stringMatching(/^ec2-runners-556-/)]);
   expect(table.get(555)?.status).toBe("queued");
   expect(table.get(557)?.status).toBe("done");
 });
@@ -488,21 +509,41 @@ test("reconciler fails a job after two of its runners went unused, and alerts on
   expect(fleetCalls()).toHaveLength(0);
 });
 
-test("reconciler retries a launch that lacks capacity and alerts on the third failure", async () => {
+test("reconciler retries a launch that lacks capacity within the invocation", async () => {
   queuedRow(557, ["ec2"]);
   githubJob("example-org/app", 557);
   ghRoutes["DELETE /orgs/example-org/actions/runners/1001"] = { status: 204 };
+  let fleetCalls = 0;
+  const launching = ec2With();
+  const short = ec2With({ fleet: "no-capacity" });
+  // Every subnet lacks capacity on the first pass; the second pass gets an instance.
+  ec2Handler = (name) => {
+    if (name === "CreateFleetCommand") fleetCalls++;
+    return (fleetCalls <= 6 ? short : launching)(name);
+  };
+
+  expect((await reconciler()).outcomes).toEqual({ 557: "launched" });
+  expect(table.get(557)).toMatchObject({ status: "queued", launchFailures: 1 });
+  expect(alerts()).toHaveLength(0);
+});
+
+test("reconciler alerts once when launches keep failing", async () => {
+  queuedRow(558, ["ec2"]);
+  githubJob("example-org/app", 558);
+  ghRoutes["DELETE /orgs/example-org/actions/runners/1001"] = { status: 204 };
   ec2Handler = ec2With({ fleet: "no-capacity" });
 
-  for (let attempt = 1; attempt <= 3; attempt++) {
-    expect((await reconciler()).outcomes).toEqual({ 557: "will retry" });
-    expect(table.get(557)).toMatchObject({ status: "queued", launchFailures: attempt });
+  // Each invocation runs up to 6 passes, so two invocations fail 12 times.
+  for (const failures of [6, 12]) {
+    expect((await reconciler()).outcomes).toEqual({ 558: "will retry" });
+    expect(table.get(558)).toMatchObject({ status: "queued", launchFailures: failures });
   }
   expect(alerts()).toHaveLength(1);
-  expect(alerts()[0]!.Message).toContain("Failed 3 times");
+  expect(alerts()[0]!.Message).toContain("Failed 10 times");
   // Each failed launch removed its registration, so it never counts as available.
-  expect(ghCalls.filter((c) => c.key === "DELETE /orgs/example-org/actions/runners/1001")).toHaveLength(3);
+  expect(ghCalls.filter((c) => c.key === "DELETE /orgs/example-org/actions/runners/1001")).toHaveLength(12);
 });
+
 
 test("janitor terminates idle and expired instances and removes stale registrations", async () => {
   const name = (jobId: number, minutesAgo = 60) => runnerName(PREFIX, jobId, Date.now() - minutesAgo * 60_000);

@@ -39,6 +39,8 @@ const ReconcilerConfig = z.object({
   AMI_NAME_PREFIX: z.string().min(1),
   RUNNER_VERSION: z.string().min(1),
   BOOT_LOG_GROUP: z.string().min(1),
+  // Seconds between a pass with a failed launch and the pass that retries it.
+  RECONCILE_RETRY_SECONDS: z.coerce.number().nonnegative().default(30),
 });
 
 const JanitorConfig = z.object({

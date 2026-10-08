@@ -31,8 +31,13 @@ import { buildUserData } from "./userdata.ts";
 // Launches the reconciler runs at once.
 const LAUNCH_CONCURRENCY = 8;
 // A job that fails to launch this many times, for example for lack of
-// capacity, triggers one alert. Later reconciles keep retrying it.
-const ALERT_AFTER_FAILURES = 3;
+// capacity, triggers one alert. Later reconciles keep retrying it. With
+// retries 30 seconds apart, 10 failures take about 5 minutes.
+const ALERT_AFTER_FAILURES = 10;
+// Passes one invocation runs when launches keep failing. Together with the
+// retry delay this bounds how long an invocation retries before leaving the
+// job to the next scheduled reconcile.
+const MAX_PASSES = 6;
 // A job that still waits after this many of its runners sat idle until the
 // janitor terminated them is failed, since another runner would idle too.
 const MAX_IDLE_RUNNERS = 2;
@@ -67,12 +72,33 @@ export async function reconciler(_event?: unknown, context?: Pick<Context, "getR
   const result = await lock.runExclusive({
     holder: randomUUID(),
     holdUntil: Date.now() + remaining() + LOCK_MARGIN_MS,
-    pass: () => reconcilePass(config, context),
+    pass: () => reconcileUntilLaunched(config, context, remaining),
     canRunAgain: () => remaining() > LAUNCH_TIME_BUDGET_MS,
   });
   if (!result) log("another reconcile holds the lock; it will run a pass for this request");
   return result;
 }
+
+// Runs passes until no launch failed for a reason a retry may get past, such
+// as Spot capacity or a vCPU quota that a finishing job frees up. Retrying here,
+// RECONCILE_RETRY_SECONDS apart, gets such a job its runner well before the
+// next scheduled reconcile, which can be 5 minutes away.
+async function reconcileUntilLaunched(
+  config: ReconcilerConfig,
+  context: Pick<Context, "getRemainingTimeInMillis"> | undefined,
+  remaining: () => number,
+): Promise<PassResult> {
+  const retryMs = config.RECONCILE_RETRY_SECONDS * 1000;
+  let result = await reconcilePass(config, context);
+  for (let pass = 1; pass < MAX_PASSES && launchFailed(result) && remaining() > LAUNCH_TIME_BUDGET_MS + retryMs; pass++) {
+    log("retrying failed launches", { inSeconds: config.RECONCILE_RETRY_SECONDS, outcomes: result.outcomes });
+    await new Promise((resolve) => setTimeout(resolve, retryMs));
+    result = await reconcilePass(config, context);
+  }
+  return result;
+}
+
+const launchFailed = (result: PassResult) => Object.values(result.outcomes).some((o) => o === "will retry" || o === "error");
 
 // One look at the queue: launches a runner for each queued job that the
 // available runners cannot cover.
@@ -214,7 +240,7 @@ async function reconcileJob(config: ReconcilerConfig, jobs: JobStore, gh: GitHub
       await alert(
         config.ALERT_TOPIC_ARN,
         `Runner launch keeps failing in ${job.repo}`,
-        `${current.html_url}\n\nFailed ${failures} times. The reconciler keeps retrying every 5 minutes.\n\n${errorMessage(err)}`,
+        `${current.html_url}\n\nFailed ${failures} times. The reconciler keeps retrying.\n\n${errorMessage(err)}`,
       );
     }
     return "will retry";
