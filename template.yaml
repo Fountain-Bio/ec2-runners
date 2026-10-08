@@ -65,9 +65,24 @@ Parameters:
     Type: String
     Description: Email address subscribed to launch alerts. Leave empty to subscribe later.
     Default: ""
+  SlackWorkspaceId:
+    Type: String
+    Description: >-
+      Slack workspace ID from the Amazon Q Developer in chat applications
+      console, after authorizing the workspace there. Leave empty to skip Slack.
+    Default: ""
+  SlackChannelId:
+    Type: String
+    Description: >-
+      ID of the Slack channel that receives alerts, the last part of the
+      channel's "Copy link" URL. Leave empty to skip Slack.
+    Default: ""
 
 Conditions:
   HasAlertEmail: !Not [!Equals [!Ref AlertEmail, ""]]
+  HasSlack: !And
+    - !Not [!Equals [!Ref SlackWorkspaceId, ""]]
+    - !Not [!Equals [!Ref SlackChannelId, ""]]
 
 Resources:
   # ---------- Network: public subnets, no NAT, no inbound access ----------
@@ -397,6 +412,36 @@ Resources:
       TopicArn: !Ref AlertTopic
       Protocol: email
       Endpoint: !Ref AlertEmail
+
+  # Posts the alert topic's messages to a Slack channel through Amazon Q
+  # Developer in chat applications (formerly AWS Chatbot). The role and the
+  # channel guardrail allow only CloudWatch reads, so nobody can change the
+  # stack's resources from Slack.
+  SlackChannelRole:
+    Type: AWS::IAM::Role
+    Condition: HasSlack
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: chatbot.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Sub arn:${AWS::Partition}:iam::aws:policy/CloudWatchReadOnlyAccess
+
+  SlackChannel:
+    Type: AWS::Chatbot::SlackChannelConfiguration
+    Condition: HasSlack
+    Properties:
+      ConfigurationName: !Sub ${AWS::StackName}-alerts
+      SlackWorkspaceId: !Ref SlackWorkspaceId
+      SlackChannelId: !Ref SlackChannelId
+      SnsTopicArns: [!Ref AlertTopic]
+      IamRoleArn: !GetAtt SlackChannelRole.Arn
+      GuardrailPolicies:
+        - !Sub arn:${AWS::Partition}:iam::aws:policy/CloudWatchReadOnlyAccess
+      LoggingLevel: ERROR
 
   WebhookLogs:
     Type: AWS::Logs::LogGroup

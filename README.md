@@ -19,7 +19,7 @@ Runner names are `<stack>-<job id>-<launch time>`. The job ID shows which job th
 
 ### Alerts
 
-The `<stack>-alerts` SNS topic receives these alerts:
+The `<stack>-alerts` SNS topic receives these alerts and passes them to Slack (setup step 2) and to `AlertEmail`:
 
 - A job whose labels can never launch, such as `cpu=3` or an unknown image. Sent once per job.
 - A job that has failed to launch three times, for example for lack of capacity. The reconciler keeps retrying it every 5 minutes.
@@ -113,12 +113,26 @@ AWS_PROFILE=dev ./deploy.sh AlertEmail=you@example.com
 
 The script deploys to us-west-2 unless `AWS_REGION` is set. It creates an artifact bucket for the Lambda zip on first run, then bundles the code, packages, and deploys. The region needs three availability zones, and the `runs-on-v2.2-*` AMIs are published in us-east-1, us-east-2, us-west-2, eu-west-1, eu-west-2, eu-west-3, eu-central-1, ap-south-1, ap-northeast-1, ap-southeast-1, and ap-southeast-2. The stack prints `WebhookUrl`, `GitHubAppSecretArn`, `CacheBucket`, and `AlertTopicArn`. With `AlertEmail` set, SNS emails a subscription confirmation that must be accepted before alerts arrive.
 
-### 2. Create the GitHub App
+### 2. Connect Slack
+
+Alerts reach Slack through Amazon Q Developer in chat applications (formerly AWS Chatbot), which needs a one-time authorization per AWS account:
+
+1. In the development account, open the Amazon Q Developer in chat applications console, choose Slack under "Configure a chat client", and approve your Slack workspace in the Slack prompt.
+2. Copy the workspace ID that the console then shows.
+3. Deploy again with the workspace and channel. `<channel ID>` is #alerts.
+
+```bash
+AWS_PROFILE=dev ./deploy.sh SlackWorkspaceId=<workspace ID> SlackChannelId=<channel ID>
+```
+
+The stack creates the channel configuration, subscribed to the alert topic, with a CloudWatch read-only role and guardrail. A private channel also needs `/invite @Amazon Q` in Slack.
+
+### 3. Create the GitHub App
 
 In the example-org org settings, open Developer settings, then GitHub Apps, then New GitHub App:
 
 - Webhook URL: the `WebhookUrl` output.
-- Webhook secret: a random string, for example from `openssl rand -hex 32`. Keep it for step 3.
+- Webhook secret: a random string, for example from `openssl rand -hex 32`. Keep it for step 4.
 - Repository permissions: Actions: Read-only, Metadata: Read-only.
 - Organization permissions: Self-hosted runners: Read and write.
 - Subscribe to events: Workflow job.
@@ -126,7 +140,7 @@ In the example-org org settings, open Developer settings, then GitHub Apps, then
 
 After creating the app, note the App ID, generate a private key (a `.pem` file downloads), and install the app on the org for all repositories or the ones that should use EC2 runners.
 
-### 3. Store the credentials
+### 4. Store the credentials
 
 ```bash
 aws secretsmanager put-secret-value \
@@ -138,11 +152,11 @@ aws secretsmanager put-secret-value \
       '{appId: $appId, privateKey: $privateKey, webhookSecret: $webhookSecret}')"
 ```
 
-### 4. Check the runner group
+### 5. Check the runner group
 
 The reconciler registers runners in the org's Default runner group (ID 1). Jobs from public repositories are ignored by default, because pull requests from forks would run untrusted code with write access to the shared cache bucket. To use these runners from public repositories anyway, deploy with `AllowPublicRepos=true` and enable "Allow public repositories" on the runner group in org settings under Actions, Runner groups. GitHub gives runners to any job the runner group allows, so the reconciler also reads the group's setting: while the group allows public repositories and `AllowPublicRepos` is false, it launches nothing and sends an alert.
 
-### 5. Test
+### 6. Test
 
 Push a workflow with `runs-on: [ec2]`. In the GitHub App's Advanced tab, recent deliveries should show `202` for `queued` events and `200` for most other events. Logs are in CloudWatch under `/aws/lambda/<stack>-webhook`, `-reconciler`, and `-janitor`. The boot log on an instance is `/var/log/ec2-runner-boot.log`, reachable through Session Manager while the instance is alive.
 
@@ -159,8 +173,9 @@ Push a workflow with `runs-on: [ec2]`. In the GitHub App's Advanced tab, recent 
 | `RunnerVersion` | `latest` | actions/runner version to download when the AMI does not have one at `/opt/ec2-runner`. The boot script checks the download against the SHA-256 digest GitHub publishes for the release asset, so the version must be 2.325.0 or later. |
 | `CacheRetentionDays` | `10` | Lifecycle expiry on the cache bucket. |
 | `VpcCidr` | `10.42.0.0/16` | VPC range, split into three /20 subnets. |
-| `AllowPublicRepos` | `false` | Launch runners for jobs from public repositories. See setup step 4. |
+| `AllowPublicRepos` | `false` | Launch runners for jobs from public repositories. See setup step 5. |
 | `AlertEmail` | empty | Email address subscribed to the `<stack>-alerts` topic. See [Alerts](#alerts) for what it receives. |
+| `SlackWorkspaceId`, `SlackChannelId` | empty | Slack workspace and channel that receive the alert topic. See setup step 2. |
 
 Pass overrides as `./deploy.sh Key=Value …`.
 

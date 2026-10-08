@@ -5,6 +5,7 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { JobConfigError, hasTriggerLabel, instanceRequirements, parseLabels, type LaunchSpec } from "../src/labels.ts";
+import { alertMessage } from "../src/alerts.ts";
 import { verifySignature } from "../src/github.ts";
 import { availableRunners, canRun, classifyRunners, parseRunnerName, runnerName, unmatchedJobs } from "../src/pool.ts";
 import { buildUserData } from "../src/userdata.ts";
@@ -260,6 +261,23 @@ test("deleteStaleLaunchTemplateVersions deletes only old per-launch versions", a
   });
   expect(deleted).toEqual(["5"]);
   expect(calls.at(-1)).toEqual({ name: "DeleteLaunchTemplateVersionsCommand", input: { LaunchTemplateId: "lt-1", Versions: ["5"] } });
+});
+
+test("alertMessage sends Chatbot's custom format to Slack and plain text to email", () => {
+  const { Subject, Message } = alertMessage("Runner launch keeps failing in example-org/app", "Failed 3 times.");
+  expect(Subject).toBe("Runner launch keeps failing in example-org/app");
+  const byProtocol = JSON.parse(Message);
+  expect(byProtocol.email).toBe("Runner launch keeps failing in example-org/app\n\nFailed 3 times.");
+  expect(JSON.parse(byProtocol.default)).toEqual({
+    version: "1.0",
+    source: "custom",
+    content: {
+      textType: "client-markdown",
+      title: ":warning: Runner launch keeps failing in example-org/app",
+      description: "Failed 3 times.",
+    },
+  });
+  expect(alertMessage("x".repeat(300), "y").Subject).toHaveLength(100);
 });
 
 test("runner names carry the job ID and launch time", () => {

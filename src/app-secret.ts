@@ -13,7 +13,7 @@ const filledIn = z
   .min(1)
   .refine((s) => !s.startsWith("REPLACE"), "still the REPLACE_ME placeholder");
 
-// The JSON stored in the GitHub App secret. See README, step 3.
+// The JSON stored in the GitHub App secret. See README, setup step 4.
 const AppSecret = z.object({
   appId: z.union([z.string(), z.int()]).transform(String).pipe(filledIn),
   privateKey: filledIn,
@@ -27,7 +27,7 @@ export async function loadSecret(secretArn: string): Promise<AppSecret> {
   const res = await secrets.send(new GetSecretValueCommand({ SecretId: secretArn }));
   const parsed = AppSecret.safeParse(JSON.parse(res.SecretString ?? "{}"));
   if (!parsed.success) {
-    throw new Error(`Secret ${secretArn} is incomplete. See README, step 3.\n${z.prettifyError(parsed.error)}`);
+    throw new Error(`Secret ${secretArn} is incomplete. See README, setup step 4.\n${z.prettifyError(parsed.error)}`);
   }
   cachedSecret = parsed.data;
   return cachedSecret;
