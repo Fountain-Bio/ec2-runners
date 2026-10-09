@@ -3,12 +3,22 @@
 // The GitHub App is installed on one org. Octokit's app auth signs the app JWT,
 // exchanges it for an installation token, and refreshes that token before it
 // expires, so one client is reused across warm Lambda invocations.
+//
+// GitHub sometimes fails a request with a 5xx, drops a connection, or answers
+// with a rate limit, and one such answer would otherwise fail a whole
+// reconcile or backfill. The retry plugin retries server errors and failed
+// connections, and the throttling plugin paces requests the way GitHub
+// recommends and waits out short rate limits.
 
 import { createAppAuth } from "@octokit/auth-app";
 import type { components } from "@octokit/openapi-webhooks-types";
+import { retry } from "@octokit/plugin-retry";
+import { throttling } from "@octokit/plugin-throttling";
 import { RequestError } from "@octokit/request-error";
 import { Octokit } from "@octokit/rest";
 import { verify } from "@octokit/webhooks-methods";
+import Bottleneck from "bottleneck";
+import { log } from "./log.ts";
 
 // workflow_job webhook payloads, typed from GitHub's OpenAPI description.
 export type WorkflowJobEvent =
@@ -43,26 +53,78 @@ export type RunnerArch = "x64" | "arm64";
 // themselves, so only warnings (such as deprecation notices) are kept.
 const quietLog = { debug: () => {}, info: () => {}, warn: console.warn, error: () => {} };
 
+// Retries after a server error or failed connection, which Octokit reports as
+// a 500. The waits are 1 and 4 seconds. No 4xx is retried: a rate limit is
+// the throttling plugin's to retry, and the rest fail the same way again.
+const SERVER_ERROR_RETRIES = 2;
+const NOT_RETRIED = Array.from({ length: 100 }, (_, i) => 400 + i);
+// The longest rate limit wait a request sits out, once. A longer one fails
+// the request, and the next scheduled run, at most 5 minutes later, tries
+// again. GitHub asks for a minute when it gives no retry-after header.
+const MAX_RATE_LIMIT_WAIT_SECONDS = 30;
+
+// Logs each failed attempt the retry plugin will retry. Registered before
+// the retry plugin, so its hook runs inside the retries and sees every attempt.
+function logRetries(octokit: Pick<Octokit, "hook">) {
+  octokit.hook.error("request", (error, options) => {
+    if (error instanceof RequestError && error.status >= 500) {
+      const retryCount = (options.request as { retryCount?: number } | undefined)?.retryCount ?? 0;
+      log("GitHub request failed", {
+        request: `${options.method} ${options.url}`,
+        status: error.status,
+        error: error.message,
+        retrying: retryCount < SERVER_ERROR_RETRIES,
+      });
+    }
+    throw error;
+  });
+}
+
+const GitHubOctokit = Octokit.plugin(logRetries, retry, throttling);
+type GitHubOctokit = InstanceType<typeof GitHubOctokit>;
+
+// Waits out a rate limit once when GitHub asks for a short wait.
+function retryRateLimit(limit: string, retryAfter: number, options: { method: string; url: string }, retryCount: number): boolean {
+  const retrying = retryCount === 0 && retryAfter <= MAX_RATE_LIMIT_WAIT_SECONDS;
+  log("GitHub rate limit", { limit, request: `${options.method} ${options.url}`, retryAfterSeconds: retryAfter, retrying });
+  return retrying;
+}
+
 export class GitHubClient {
   private readonly appId: string;
   private readonly privateKey: string;
   private readonly org: string;
-  private installation: Promise<Octokit> | undefined;
+  private readonly options: ConstructorParameters<typeof GitHubOctokit>[0];
+  private installation: Promise<GitHubOctokit> | undefined;
 
-  constructor({ appId, privateKey, org }: { appId: string; privateKey: string; org: string }) {
+  // secondMs is the length of a second in the client's waits: retry backoff,
+  // rate limit waits, and the pacing of write requests. Tests set it to 0.
+  constructor({ appId, privateKey, org, secondMs = 1000 }: { appId: string; privateKey: string; org: string; secondMs?: number }) {
     this.appId = appId;
     this.privateKey = privateKey;
     this.org = org;
+    this.options = {
+      log: quietLog,
+      retry: { retries: SERVER_ERROR_RETRIES, doNotRetry: NOT_RETRIED, retryAfterBaseValue: secondMs },
+      throttle: {
+        retryAfterBaseValue: secondMs,
+        // GitHub asks for a second between write requests. The plugin's own
+        // write group always waits a real second; this one waits secondMs.
+        write: new Bottleneck.Group({ maxConcurrent: 1, minTime: secondMs }),
+        onRateLimit: (retryAfter, options, _octokit, retryCount) => retryRateLimit("primary", retryAfter, options, retryCount),
+        onSecondaryRateLimit: (retryAfter, options, _octokit, retryCount) => retryRateLimit("secondary", retryAfter, options, retryCount),
+      },
+    };
   }
 
   // Looks up the app's installation on the org once, then returns a client
   // that authenticates as that installation.
-  private octokit(): Promise<Octokit> {
+  private octokit(): Promise<GitHubOctokit> {
     this.installation ??= (async () => {
       const auth = { appId: this.appId, privateKey: this.privateKey };
-      const app = new Octokit({ authStrategy: createAppAuth, auth, log: quietLog });
+      const app = new GitHubOctokit({ ...this.options, authStrategy: createAppAuth, auth });
       const { data } = await app.rest.apps.getOrgInstallation({ org: this.org });
-      return new Octokit({ authStrategy: createAppAuth, auth: { ...auth, installationId: data.id }, log: quietLog });
+      return new GitHubOctokit({ ...this.options, authStrategy: createAppAuth, auth: { ...auth, installationId: data.id } });
     })();
     // A failed lookup is retried on the next call.
     this.installation.catch(() => (this.installation = undefined));

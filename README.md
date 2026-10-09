@@ -30,7 +30,7 @@ The `<stack>-alerts` SNS topic receives these alerts and passes them to Slack (s
 - CloudWatch alarms, both when they fire and when they clear:
   - `<stack>-webhook-errors`: the webhook failed on a delivery. GitHub does not retry it. The next scheduled reconcile records the job if it is still queued, so fixing the cause is the only action needed.
   - `<stack>-webhook-invalid-signatures`: three or more deliveries in 15 minutes failed signature checks, which usually means the webhook secret in GitHub differs from the one in the app secret.
-  - `<stack>-reconciler-errors`: a reconcile failed before reaching any job, for example on a GitHub API error, or the scheduled check for queued jobs missing from the jobs table failed.
+  - `<stack>-reconciler-errors`: a reconcile failed before reaching any job, for example on a GitHub API error, or the scheduled check for queued jobs missing from the jobs table failed. The GitHub client retries a server error or failed connection twice, 1 and 4 seconds later, and waits out a rate limit once when GitHub asks for 30 seconds or less, so the alarm means GitHub kept failing or asked for a longer wait. The log records each failed attempt as `GitHub request failed` and each rate limit as `GitHub rate limit`.
   - `<stack>-janitor-errors`: the janitor failed, so idle instances are not being terminated.
 
 A job that cannot launch stays queued in GitHub until it is cancelled or GitHub's 24-hour queue limit ends it.
@@ -194,7 +194,7 @@ Pass overrides as `./deploy.sh Key=Value …`.
 
 ## Development
 
-The code is TypeScript, run directly by [Bun](https://bun.com) in development. GitHub calls and webhook payload types come from Octokit, and Zod parses the environment, the app secret, and the rows read from the jobs table. The Lambdas run on the Node.js 24 runtime, so `deploy.sh` bundles `src/index.ts` and its dependencies, including the AWS SDK clients, into a single `index.mjs` with `bun build`.
+The code is TypeScript, run directly by [Bun](https://bun.com) in development. GitHub calls and webhook payload types come from Octokit, whose retry and throttling plugins retry server errors and pace requests as GitHub recommends (at most 10 at once, and a second between writes), and Zod parses the environment, the app secret, and the rows read from the jobs table. The Lambdas run on the Node.js 24 runtime, so `deploy.sh` bundles `src/index.ts` and its dependencies, including the AWS SDK clients, into a single `index.mjs` with `bun build`.
 
 ```bash
 bun install

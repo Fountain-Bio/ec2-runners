@@ -34,9 +34,17 @@ export async function loadSecret(secretArn: string): Promise<AppSecret> {
 }
 
 let cachedGitHub: GitHubClient | undefined;
-export async function github({ SECRET_ARN, GITHUB_ORG }: { SECRET_ARN: string; GITHUB_ORG: string }): Promise<GitHubClient> {
+export async function github({
+  SECRET_ARN,
+  GITHUB_ORG,
+  GITHUB_SECOND_MS,
+}: {
+  SECRET_ARN: string;
+  GITHUB_ORG: string;
+  GITHUB_SECOND_MS: number;
+}): Promise<GitHubClient> {
   if (cachedGitHub) return cachedGitHub;
   const s = await loadSecret(SECRET_ARN);
-  cachedGitHub = new GitHubClient({ appId: s.appId, privateKey: s.privateKey, org: GITHUB_ORG });
+  cachedGitHub = new GitHubClient({ appId: s.appId, privateKey: s.privateKey, org: GITHUB_ORG, secondMs: GITHUB_SECOND_MS });
   return cachedGitHub;
 }

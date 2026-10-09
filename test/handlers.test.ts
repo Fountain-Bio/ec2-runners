@@ -40,10 +40,19 @@ Object.assign(process.env, {
   AMI_NAME_PREFIX: "runs-on-v2.2-",
   RUNNER_VERSION: "latest",
   RECONCILE_RETRY_SECONDS: "0",
+  GITHUB_SECOND_MS: "0",
   CPU_BASELINE_FAMILY: "m6i",
   BOOT_LOG_GROUP: "/ec2-runners/ec2-runners/boot",
   ALLOW_PUBLIC_REPOS: "false",
 });
+
+// Tests can move the clock forward but never back: the GitHub client's
+// throttling schedules each request after the last one by Date.now, so moving
+// the clock back would stall every later request.
+const realNow = Date.now;
+let clockOffset = 0;
+Date.now = () => realNow() + clockOffset;
+const advanceClock = (ms: number) => (clockOffset += ms);
 
 interface Call {
   name: string;
@@ -110,9 +119,10 @@ Object.assign(DynamoDBDocumentClient.prototype, {
 });
 
 // ---- GitHub stub: Octokit sends every request through globalThis.fetch ----
-type Route = { status?: number; body?: unknown };
+type Route = { status?: number; body?: unknown; headers?: Record<string, string> };
 let ghCalls: { key: string; search: string; body: any }[] = [];
-let ghRoutes: Record<string, Route> = {};
+// A list of routes answers with each in turn, then keeps answering with the last.
+let ghRoutes: Record<string, Route | Route[]> = {};
 // Runners registered through generate-jitconfig and not yet deleted. The
 // runner list reports them, as GitHub does, so a later reconcile pass sees the
 // runners an earlier pass registered.
@@ -124,7 +134,8 @@ Object.assign(globalThis, {
     const key = `${init.method ?? "GET"} ${pathname}`;
     const body = init.body ? JSON.parse(String(init.body)) : undefined;
     ghCalls.push({ key, search, body });
-    const route = ghRoutes[key];
+    const listed = ghRoutes[key];
+    const route = Array.isArray(listed) ? (listed.length > 1 ? listed.shift() : listed[0]) : listed;
     const status = route?.status ?? 200;
     let responseBody = route?.body as any;
     if (key === "POST /orgs/example-org/actions/runners/generate-jitconfig" && status === 201) {
@@ -138,7 +149,7 @@ Object.assign(globalThis, {
     const res = route
       ? new Response(status === 204 ? null : JSON.stringify(responseBody), {
           status,
-          headers: { "content-type": "application/json" },
+          headers: { "content-type": "application/json", ...route.headers },
         })
       : new Response(JSON.stringify({ message: `no route for ${key}` }), { status: 500, headers: { "content-type": "application/json" } });
     // A real fetch response carries its URL, which Octokit's paginator reads.
@@ -413,21 +424,16 @@ test("reconciler launches nothing while the runner group allows public repositor
   ghRoutes["GET /orgs/example-org/actions/runner-groups/1"] = { body: { id: 1, name: "Default", allows_public_repositories: true } };
   // A private result is cached for an hour, so this test moves the clock past
   // the result cached by earlier tests.
-  const realNow = Date.now;
-  Date.now = () => realNow() + 2 * 3600_000;
-  try {
-    expect(await reconciler()).toEqual({ queued: 0, available: 0, outcomes: {}, retired: [] });
-    expect(await reconciler()).toEqual({ queued: 0, available: 0, outcomes: {}, retired: [] });
-    // One alert for the two reconciles.
-    expect(alerts()).toHaveLength(1);
-    expect(fleetCalls()).toHaveLength(0);
+  advanceClock(2 * 3600_000);
+  expect(await reconciler()).toEqual({ queued: 0, available: 0, outcomes: {}, retired: [] });
+  expect(await reconciler()).toEqual({ queued: 0, available: 0, outcomes: {}, retired: [] });
+  // One alert for the two reconciles.
+  expect(alerts()).toHaveLength(1);
+  expect(fleetCalls()).toHaveLength(0);
 
-    // Launches resume once the group is private again.
-    ghRoutes["GET /orgs/example-org/actions/runner-groups/1"] = { body: { id: 1, name: "Default", allows_public_repositories: false } };
-    expect((await reconciler()).outcomes).toEqual({ 559: "launched" });
-  } finally {
-    Date.now = realNow;
-  }
+  // Launches resume once the group is private again.
+  ghRoutes["GET /orgs/example-org/actions/runner-groups/1"] = { body: { id: 1, name: "Default", allows_public_repositories: false } };
+  expect((await reconciler()).outcomes).toEqual({ 559: "launched" });
 });
 
 test("reconciler starts no launch without time to finish it", async () => {
@@ -610,6 +616,53 @@ test("a failed backfill still reconciles recorded jobs, then fails the invocatio
   await expect(reconcilerHandler(scheduled)).rejects.toThrow("no route for GET /installation/repositories");
   expect(fleetCalls()).toHaveLength(1);
   expect(table.get(555)?.status).toBe("queued");
+});
+
+// The backfill in the scheduled reconcile above, for one repository whose run has one queued ec2 job.
+function backfillRoutes() {
+  ghRoutes["GET /installation/repositories"] = { body: { total_count: 1, repositories: [repository("monorepo")] } };
+  ghRoutes["GET /repos/example-org/monorepo/actions/runs"] = { body: { total_count: 1, workflow_runs: [{ id: 900 }] } };
+  ghRoutes["GET /repos/example-org/monorepo/actions/runs/900/jobs"] = {
+    body: { total_count: 1, jobs: [{ id: 701, run_id: 900, status: "queued", labels: ["ec2"] }] },
+  };
+  githubJob("example-org/monorepo", 701);
+}
+const secondaryRateLimit = (retryAfter: string): Route => ({
+  status: 403,
+  headers: { "retry-after": retryAfter },
+  body: { message: "You have exceeded a secondary rate limit. Please wait a few minutes before you try again." },
+});
+const callsTo = (key: string) => ghCalls.filter((c) => c.key === key).length;
+
+test("backfill retries a GitHub server error", async () => {
+  backfillRoutes();
+  const jobsList = "GET /repos/example-org/monorepo/actions/runs/900/jobs";
+  ghRoutes[jobsList] = [{ status: 502, body: { message: "Server Error" } }, { status: 503, body: { message: "Unavailable" } }, ghRoutes[jobsList] as Route];
+
+  expect((await reconciler(scheduled)).outcomes).toEqual({ 701: "launched" });
+  expect(callsTo(jobsList)).toBe(3);
+});
+
+test("backfill waits out a short secondary rate limit and gives up on a long one", async () => {
+  backfillRoutes();
+  const repoList = "GET /installation/repositories";
+  ghRoutes[repoList] = [secondaryRateLimit("5"), ghRoutes[repoList] as Route];
+  expect((await reconciler(scheduled)).outcomes).toEqual({ 701: "launched" });
+  expect(callsTo(repoList)).toBe(2);
+
+  ghCalls = [];
+  table.delete(701);
+  ghRoutes[repoList] = secondaryRateLimit("120");
+  await expect(reconcilerHandler(scheduled)).rejects.toThrow("secondary rate limit");
+  expect(callsTo(repoList)).toBe(1);
+});
+
+test("a GitHub client error is not retried", async () => {
+  queuedRow(555, ["ec2"]);
+  ghRoutes["GET /repos/example-org/app/actions/jobs/555"] = { status: 403, body: { message: "Resource not accessible by integration" } };
+  expect((await reconciler()).outcomes).toEqual({ 555: "error" });
+  // One lookup in each of the invocation's six passes.
+  expect(callsTo("GET /repos/example-org/app/actions/jobs/555")).toBe(6);
 });
 
 

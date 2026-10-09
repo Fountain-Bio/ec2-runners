@@ -12,6 +12,12 @@ const common = {
   RUNNER_PREFIX: z.string().min(1),
 };
 
+// The handlers that call GitHub read this. Milliseconds in each second the
+// GitHub client waits for a retry, a rate limit, or write pacing. Tests set 0.
+const githubClient = {
+  GITHUB_SECOND_MS: z.coerce.number().nonnegative().default(1000),
+};
+
 const WebhookConfig = z.object({
   ...common,
   TRIGGER_LABEL: z.string().min(1),
@@ -23,6 +29,7 @@ const WebhookConfig = z.object({
 
 const ReconcilerConfig = z.object({
   ...common,
+  ...githubClient,
   // Set by the Lambda runtime.
   AWS_REGION: z.string().min(1),
   TRIGGER_LABEL: z.string().min(1),
@@ -48,6 +55,7 @@ const ReconcilerConfig = z.object({
 
 const JanitorConfig = z.object({
   ...common,
+  ...githubClient,
   JOBS_TABLE: z.string().min(1),
   IDLE_MINUTES: z.coerce.number().positive(),
   MAX_MINUTES: z.coerce.number().positive(),
