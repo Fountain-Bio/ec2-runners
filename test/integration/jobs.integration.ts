@@ -84,9 +84,9 @@ test("a queued job is listed and expires a day after it was queued", async () =>
 });
 
 test("a redelivered queued event leaves the existing row alone", async () => {
-  await store.markQueued(job(2));
+  expect(await store.markQueued(job(2))).toBe(true);
   expect(await store.recordLaunchFailure(2)).toBe(1);
-  await store.markQueued(job(2, ["ec2", "cpu=8"]));
+  expect(await store.markQueued(job(2, ["ec2", "cpu=8"]))).toBe(false);
   expect(await row(2)).toMatchObject({ labels: ["ec2"], launchFailures: 1, status: "queued" });
 });
 

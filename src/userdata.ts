@@ -18,6 +18,14 @@ export interface UserDataOptions {
   bootLogGroup: string;
 }
 
+// The directory that holds each job's workspace, <dir>/<repo>/<repo>. The
+// reconciler sets it in the JIT config, and the boot script creates it. It
+// matches GitHub-hosted runners (and Blacksmith's), because actions/cache
+// stores paths outside the workspace relative to the workspace: a cache of
+// ~/.bun saved there holds ../../../.bun, which lands in the runner's home
+// only when the workspace sits at the same place.
+export const RUNNER_WORK_DIR = "/home/runner/work";
+
 function shellQuote(value: string): string {
   return `'${value.replace(/'/g, `'\\''`)}'`;
 }
@@ -39,6 +47,7 @@ RUNNER_SHA256=${shellQuote(runner.sha256)}
 RUNNER_NAME=${shellQuote(runnerName)}
 BOOT_LOG_GROUP=${shellQuote(bootLogGroup)}
 RUNNER_DIR=/opt/ec2-runner
+WORK_DIR=${shellQuote(RUNNER_WORK_DIR)}
 HOOK_DIR=/opt/ec2-runner-hooks
 
 # The boot log is lost when the instance terminates, so it is copied to
@@ -130,14 +139,14 @@ if [ ! -x "$RUNNER_DIR/run.sh" ]; then
   rm -f /tmp/actions-runner.tar.gz
 fi
 
+# The JIT config points the runner's work folder at WORK_DIR.
+mkdir -p "$WORK_DIR"
 if [ "$NVME" = true ]; then
-  # The runner's default work folder is _work inside its directory. A bind
-  # mount keeps the physical and logical paths identical for tools that
-  # compare realpath(cwd) with GITHUB_WORKSPACE.
-  mkdir -p "$RUNNER_DIR/_work"
-  mount --bind /mnt/nvme/work "$RUNNER_DIR/_work"
-  chown runner:runner /mnt/nvme/work
+  # A bind mount keeps the physical and logical paths identical for tools
+  # that compare realpath(cwd) with GITHUB_WORKSPACE.
+  mount --bind /mnt/nvme/work "$WORK_DIR"
 fi
+chown runner:runner "$WORK_DIR"
 
 # ---- Job-started hook ----
 # Runs as the runner user before each job. Writing to GITHUB_ENV makes the

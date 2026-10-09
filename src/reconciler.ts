@@ -3,7 +3,8 @@
 // Invoked asynchronously by the webhook and every 5 minutes by a schedule.
 // Invocations can run at the same time, so each pass runs under the
 // ReconcileLock (lock.ts): passes never overlap, and each one sees the runners
-// the previous one registered.
+// the previous one registered. The scheduled invocation first asks GitHub for
+// queued jobs whose "queued" webhook never arrived (backfillQueuedJobs).
 
 import { randomUUID } from "node:crypto";
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
@@ -22,11 +23,11 @@ import {
 } from "./ec2.ts";
 import { isGitHubError, type GitHubClient, type RunnerDownload } from "./github.ts";
 import { jobStore, type JobStore, type QueuedJob } from "./jobs.ts";
-import { JobConfigError, parseLabels } from "./labels.ts";
+import { JobConfigError, hasTriggerLabel, parseLabels } from "./labels.ts";
 import { ReconcileLock } from "./lock.ts";
 import { errorMessage, log } from "./log.ts";
 import { LAUNCH_GRACE_MS, availableRunners, matchJobs, retirableRunners, runnerName, type AvailableRunner } from "./pool.ts";
-import { buildUserData } from "./userdata.ts";
+import { RUNNER_WORK_DIR, buildUserData } from "./userdata.ts";
 
 // Launches the reconciler runs at once.
 const LAUNCH_CONCURRENCY = 8;
@@ -53,22 +54,39 @@ const DEFAULT_HOLD_MS = 5 * 60_000;
 // How long the reconciler caches the runner group's public-repository
 // setting and the runner tarball lookup.
 const CACHE_MS = 60 * 60_000;
+// GitHub fails a job that has waited this long for a runner, so the backfill
+// looks only at workflow runs created within it.
+const QUEUE_LIMIT_MS = 24 * 60 * 60_000;
+// Repositories the backfill queries at once.
+const BACKFILL_CONCURRENCY = 4;
 
 const ec2 = new EC2Client({});
 let cachedLock: ReconcileLock | undefined;
 
 type LaunchOutcome = "launched" | "already started" | "gone" | "failed" | "will retry" | "error" | "deferred";
 
-// The schedule passes an EventBridge event and the webhook passes none; the
-// reconciler reads neither. The context is absent in tests.
 type PassResult = { queued: number; available: number; outcomes: Record<string, LaunchOutcome>; retired: string[] };
 
-// Returns undefined when another invocation is reconciling; that invocation
-// runs another pass for this one.
-export async function reconciler(_event?: unknown, context?: Pick<Context, "getRemainingTimeInMillis">): Promise<PassResult | undefined> {
+// The schedule passes an EventBridge event, and the webhook passes none. The
+// context is absent in tests. Returns undefined when another invocation is
+// reconciling; that invocation runs another pass for this one.
+export async function reconciler(event?: unknown, context?: Pick<Context, "getRemainingTimeInMillis">): Promise<PassResult | undefined> {
   const config = reconcilerConfig();
   const lock = (cachedLock ??= new ReconcileLock(new DynamoDBClient({}), config.JOBS_TABLE));
   const remaining = () => context?.getRemainingTimeInMillis() ?? DEFAULT_HOLD_MS;
+
+  // Only the schedule backfills, so a burst of webhook invocations does not
+  // query every repository once per job. A failed backfill still lets the
+  // reconcile launch for the jobs already recorded, and is rethrown after it
+  // so the reconciler-errors alarm fires.
+  let backfillError: Error | undefined;
+  if (isScheduledEvent(event)) {
+    await backfillQueuedJobs(config).catch((err) => {
+      log("backfill of queued jobs failed", { error: errorMessage(err) });
+      backfillError = err instanceof Error ? err : new Error(errorMessage(err));
+    });
+  }
+
   const result = await lock.runExclusive({
     holder: randomUUID(),
     holdUntil: Date.now() + remaining() + LOCK_MARGIN_MS,
@@ -76,7 +94,36 @@ export async function reconciler(_event?: unknown, context?: Pick<Context, "getR
     canRunAgain: () => remaining() > LAUNCH_TIME_BUDGET_MS,
   });
   if (!result) log("another reconcile holds the lock; it will run a pass for this request");
+  if (backfillError) throw backfillError;
   return result;
+}
+
+// EventBridge rules send events with source "aws.events".
+function isScheduledEvent(event: unknown): boolean {
+  return typeof event === "object" && event !== null && "source" in event && event.source === "aws.events";
+}
+
+// GitHub sometimes never sends a job's "queued" webhook, and the jobs table
+// then has no row for the job, so no reconcile launches for it. This asks
+// GitHub for the jobs waiting in the installation's repositories and records
+// those with the trigger label. markQueued leaves existing rows alone, so
+// jobs the webhook recorded, and jobs already done or failed, are unchanged.
+async function backfillQueuedJobs(config: ReconcilerConfig): Promise<void> {
+  const jobs = jobStore(config.JOBS_TABLE);
+  const gh = await github(config);
+  const since = new Date(Date.now() - QUEUE_LIMIT_MS);
+  // The webhook ignores public repositories' jobs for the same reason (see webhook.ts).
+  const repos = (await gh.listRepositories()).filter((r) => !r.archived && !r.disabled && (r.private || config.ALLOW_PUBLIC_REPOS));
+  const recorded: { repo: string; jobId: number }[] = [];
+  await forEachLimit(repos, BACKFILL_CONCURRENCY, async (repo) => {
+    for (const job of await gh.listQueuedJobs(repo.full_name, since)) {
+      if (!hasTriggerLabel(job.labels, config.TRIGGER_LABEL)) continue;
+      if (await jobs.markQueued({ jobId: job.id, repo: repo.full_name, runId: job.run_id, labels: job.labels })) {
+        recorded.push({ repo: repo.full_name, jobId: job.id });
+      }
+    }
+  });
+  if (recorded.length > 0) log("recorded queued jobs whose webhook never arrived", { jobs: recorded });
 }
 
 // Runs passes until no launch failed for a reason a retry may get past, such
@@ -260,7 +307,7 @@ async function launchForJob(config: ReconcilerConfig, gh: GitHubClient, job: Que
   const runner = await runnerDownload(config, gh, ami);
 
   const name = runnerName(config.RUNNER_PREFIX, job.jobId);
-  const jit = await gh.generateJitConfig({ name, labels: job.labels, runnerGroupId: config.RUNNER_GROUP_ID });
+  const jit = await gh.generateJitConfig({ name, labels: job.labels, runnerGroupId: config.RUNNER_GROUP_ID, workFolder: RUNNER_WORK_DIR });
   try {
     const result = await launchRunner(ec2, {
       launchTemplateId: config.LAUNCH_TEMPLATE_ID,

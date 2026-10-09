@@ -38,10 +38,11 @@ export class JobStore {
     return Math.floor(now / 1000) + TTL_SECONDS;
   }
 
-  // Adds a queued job. Does nothing when a row already exists, which covers a
-  // redelivered webhook and a "queued" event that arrives after the job's
-  // "in_progress" event.
-  async markQueued(job: Omit<QueuedJob, "idleRunners">, now = Date.now()): Promise<void> {
+  // Adds a queued job and returns whether it did. Does nothing when a row
+  // already exists, which covers a redelivered webhook, a "queued" event that
+  // arrives after the job's "in_progress" event, and the reconciler's
+  // backfill finding a job the webhook already recorded.
+  async markQueued(job: Omit<QueuedJob, "idleRunners">, now = Date.now()): Promise<boolean> {
     try {
       await this.doc.send(
         new PutCommand({
@@ -50,8 +51,10 @@ export class JobStore {
           ConditionExpression: "attribute_not_exists(jobId)",
         }),
       );
+      return true;
     } catch (err) {
       if (!(err instanceof ConditionalCheckFailedException)) throw err;
+      return false;
     }
   }
 

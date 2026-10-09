@@ -107,6 +107,9 @@ test("buildUserData produces valid bash with the JIT config and cache settings",
   expect(script).toMatch(/run\.sh --jitconfig/);
   expect(script).toMatch(/ACTIONS_RUNNER_HOOK_JOB_STARTED=\$HOOK_DIR\/job-started\.sh/);
   expect(script).toMatch(/mount --bind \/mnt\/nvme\/docker \/var\/lib\/docker/);
+  // Jobs run in GitHub-hosted runners' workspace layout, on NVMe when there is one.
+  expect(script).toContain("WORK_DIR='/home/runner/work'");
+  expect(script).toContain('mount --bind /mnt/nvme/work "$WORK_DIR"');
   expect(script).not.toMatch(/ecr/i);
   expect(script).toContain(`RUNNER_SHA256='${runner.sha256}'`);
   expect(script).toContain(`RUNNER_URL='${runner.url}'`);

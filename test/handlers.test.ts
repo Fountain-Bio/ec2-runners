@@ -346,7 +346,7 @@ test("reconciler launches a runner for a queued job with none available", async 
 
   const jit = ghCalls.find((c) => c.key.endsWith("generate-jitconfig"))!;
   expect(jit.body.name).toMatch(/^ec2-runners-555-[0-9a-z]+$/);
-  expect(jit.body).toMatchObject({ runner_group_id: 1, labels: ["ec2", "cpu=4"] });
+  expect(jit.body).toMatchObject({ runner_group_id: 1, labels: ["ec2", "cpu=4"], work_folder: "/home/runner/work" });
 
   const version = awsCalls.find((c) => c.name === "CreateLaunchTemplateVersionCommand")!.input;
   expect(version.LaunchTemplateData.ImageId).toBe("ami-new");
@@ -547,6 +547,69 @@ test("reconciler alerts once when launches keep failing", async () => {
   expect(alerts()[0]!.Message).toContain("Failed 10 times");
   // Each failed launch removed its registration, so it never counts as available.
   expect(ghCalls.filter((c) => c.key === "DELETE /orgs/example-org/actions/runners/1001")).toHaveLength(12);
+});
+
+// The event an EventBridge schedule rule sends.
+const scheduled = { source: "aws.events", "detail-type": "Scheduled Event" };
+const repository = (name: string, { isPrivate = true, archived = false } = {}) => ({
+  full_name: `example-org/${name}`,
+  private: isPrivate,
+  archived,
+  disabled: false,
+});
+
+test("scheduled reconcile records queued jobs whose webhook never arrived, and launches for them", async () => {
+  ghRoutes["GET /installation/repositories"] = {
+    body: {
+      total_count: 3,
+      repositories: [repository("monorepo"), repository("site", { isPrivate: false }), repository("old", { archived: true })],
+    },
+  };
+  // The stub ignores the query string, so this run is listed as both queued
+  // and in_progress, the way a run that changes status between the two
+  // requests would be.
+  ghRoutes["GET /repos/example-org/monorepo/actions/runs"] = { body: { total_count: 1, workflow_runs: [{ id: 900 }] } };
+  ghRoutes["GET /repos/example-org/monorepo/actions/runs/900/jobs"] = {
+    body: {
+      total_count: 4,
+      jobs: [
+        { id: 701, run_id: 900, status: "queued", labels: ["ec2", "cpu=4"] },
+        { id: 702, run_id: 900, status: "queued", labels: ["ubuntu-latest"] },
+        { id: 703, run_id: 900, status: "in_progress", labels: ["ec2"] },
+        // Started on a runner; GitHub's job list has not caught up yet.
+        { id: 704, run_id: 900, status: "queued", labels: ["ec2"] },
+      ],
+    },
+  };
+  table.set(704, { jobId: 704, repo: "example-org/monorepo", runId: 900, labels: ["ec2"], status: "done" });
+  githubJob("example-org/monorepo", 701);
+
+  expect((await reconciler(scheduled)).outcomes).toEqual({ 701: "launched" });
+  expect(table.get(701)).toMatchObject({ repo: "example-org/monorepo", runId: 900, labels: ["ec2", "cpu=4"], status: "queued" });
+  expect(table.has(702)).toBe(false);
+  expect(table.has(703)).toBe(false);
+  expect(table.get(704)?.status).toBe("done");
+
+  const runLists = ghCalls.filter((c) => c.key === "GET /repos/example-org/monorepo/actions/runs").map((c) => new URLSearchParams(c.search));
+  expect(runLists.map((q) => q.get("status")).sort()).toEqual(["in_progress", "queued"]);
+  expect(runLists[0]!.get("created")).toMatch(/^>=\d{4}-\d\d-\d\dT/);
+  // The run's jobs are listed once, and public and archived repositories are skipped.
+  expect(ghCalls.filter((c) => c.key === "GET /repos/example-org/monorepo/actions/runs/900/jobs")).toHaveLength(1);
+  expect(ghCalls.some((c) => c.key.startsWith("GET /repos/example-org/site/") || c.key.startsWith("GET /repos/example-org/old/"))).toBe(false);
+});
+
+test("reconcile invoked by the webhook does not query GitHub for queued jobs", async () => {
+  await reconciler();
+  expect(ghCalls.some((c) => c.key === "GET /installation/repositories")).toBe(false);
+});
+
+test("a failed backfill still reconciles recorded jobs, then fails the invocation", async () => {
+  // GET /installation/repositories has no route, so GitHub answers 500.
+  queuedRow(555, ["ec2"]);
+  githubJob("example-org/app", 555);
+  await expect(reconcilerHandler(scheduled)).rejects.toThrow("no route for GET /installation/repositories");
+  expect(fleetCalls()).toHaveLength(1);
+  expect(table.get(555)?.status).toBe("queued");
 });
 
 

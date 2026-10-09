@@ -7,7 +7,7 @@ Ephemeral GitHub Actions runners on EC2 Spot for the example-org org, deployed a
 1. GitHub sends a `workflow_job` webhook to a Lambda function URL (`<stack>-webhook`). The function checks the HMAC signature and keeps only jobs whose labels include `ec2`. It records each queued job from a private repository in a DynamoDB table (`<stack>-jobs`), marks jobs done when they start or finish, and invokes the reconciler asynchronously.
 2. The reconciler (`<stack>-reconciler`) compares the queued jobs with the runners that could still take them: registered, idle, and either running or still launching. It launches a runner for each job those runners cannot cover. Before launching, it confirms with the GitHub API that the job is still queued, finds the newest matching AMI, and checks that some instance type matches the labels. It then registers a just-in-time runner with the job's labels and calls EC2 Fleet (`instant`) with attribute-based instance selection, one subnet per call in shuffled order, trying Spot with `price-capacity-optimized` in each subnet first, then On-Demand.
 3. The instance boot script runs `run.sh --jitconfig`, executes the job, and powers off. The launch template sets shutdown behavior to `terminate`, so power-off deletes the instance.
-4. The janitor (`<stack>-janitor`, every 5 minutes) terminates instances that have not started a job within `IdleMinutes` or have run longer than `MaxMinutes`, removes runner registrations whose instance has ended or never appeared, and deletes launch template versions left by a reconciler that stopped partway. The same schedule also runs the reconciler, which retries launches that still failed after a reconcile's own retries, replaces runners the janitor terminated for still-queued jobs, and catches up on reconciles that the webhook could not invoke. A job whose `queued` delivery never reached the webhook is not in the jobs table, so no reconcile launches for it; redeliver it from the GitHub App's Advanced tab.
+4. The janitor (`<stack>-janitor`, every 5 minutes) terminates instances that have not started a job within `IdleMinutes` or have run longer than `MaxMinutes`, removes runner registrations whose instance has ended or never appeared, and deletes launch template versions left by a reconciler that stopped partway. The same schedule also runs the reconciler, which retries launches that still failed after a reconcile's own retries, replaces runners the janitor terminated for still-queued jobs, and catches up on reconciles that the webhook could not invoke. GitHub sometimes never sends a job's `queued` webhook, and a delivery can also fail, which leaves the job out of the jobs table. Before each scheduled reconcile, the reconciler therefore lists the queued jobs in the workflow runs of the last 24 hours in every private repository the GitHub App can access (public ones too when `AllowPublicRepos` is true), and records those with the `ec2` label that the table lacks. Such a job waits at most about 5 minutes for its runner. The reconciler's log records each one as `recorded queued jobs whose webhook never arrived`.
 
 ### Why the reconciler matches jobs to runners
 
@@ -28,9 +28,9 @@ The `<stack>-alerts` SNS topic receives these alerts and passes them to Slack (s
 - A job whose runners keep going unused. When two runners launched for a job sit idle until the janitor terminates them while the job is still queued, GitHub is not assigning the job to them. Usually the runner group does not allow the job's repository. The reconciler stops launching for that job.
 - The runner group allows public repositories while `AllowPublicRepos` is false. No runners launch until one of the two settings changes.
 - CloudWatch alarms, both when they fire and when they clear:
-  - `<stack>-webhook-errors`: the webhook failed on a delivery. GitHub does not retry it, so redeliver it from the GitHub App's Advanced tab once the cause is fixed.
+  - `<stack>-webhook-errors`: the webhook failed on a delivery. GitHub does not retry it. The next scheduled reconcile records the job if it is still queued, so fixing the cause is the only action needed.
   - `<stack>-webhook-invalid-signatures`: three or more deliveries in 15 minutes failed signature checks, which usually means the webhook secret in GitHub differs from the one in the app secret.
-  - `<stack>-reconciler-errors`: a reconcile failed before reaching any job, for example on a GitHub API error.
+  - `<stack>-reconciler-errors`: a reconcile failed before reaching any job, for example on a GitHub API error, or the scheduled check for queued jobs missing from the jobs table failed.
   - `<stack>-janitor-errors`: the janitor failed, so idle instances are not being terminated.
 
 A job that cannot launch stays queued in GitHub until it is cancelled or GitHub's 24-hour queue limit ends it.
@@ -67,6 +67,8 @@ Labels can be separate entries or one string joined with `/`, for example `runs-
 
 Any other `key=value` label, such as `run=${{ github.run_id }}`, is copied onto the runner and otherwise ignored. Jobs without the `ec2` label keep running on GitHub-hosted runners, so workflows can move one job at a time.
 
+Jobs run in `/home/runner/work/<repo>/<repo>` with `HOME` at `/home/runner`, the layout of GitHub-hosted and Blacksmith runners. `actions/cache` stores paths outside the workspace, such as `~/.bun`, relative to the workspace, so this layout lets a cache saved on those runners restore to the right place here.
+
 Every job also gets these variables, usable in shells and as `${{ env.NAME }}` in workflow expressions: `EC2_RUNNER_CACHE_BUCKET`, `EC2_RUNNER_REGION`, and `EC2_RUNNER_NVME` (`true` when the instance store is in use).
 
 The cache bucket is shared by every repository and branch that uses these runners, and every job can read and write all of it. A job in one repository can therefore replace a cache entry that a build in another repository restores. Treat cached content as trusted only as far as everyone who can push a branch in the org is trusted.
@@ -79,7 +81,7 @@ Local NVMe disks and the BuildKit layer cache make image builds fast. Neither re
 
 ### Local NVMe disks
 
-When the instance type has instance-store SSDs, the boot script formats them (striped with RAID 0 when there are several), and mounts them over `/var/lib/docker`, `/var/lib/containerd`, the job work directory, and `TMPDIR`. `nvme=true` makes the reconciler choose only such instance types. Instance-store disks are much faster than the gp3 root volume and are erased when the instance terminates. Images preloaded in the AMI under `/var/lib/docker` are hidden by the mount, which matters only for jobs that relied on them.
+When the instance type has instance-store SSDs, the boot script formats them (striped with RAID 0 when there are several), and mounts them over `/var/lib/docker`, `/var/lib/containerd`, the job work directory (`/home/runner/work`), and `TMPDIR`. `nvme=true` makes the reconciler choose only such instance types. Instance-store disks are much faster than the gp3 root volume and are erased when the instance terminates. Images preloaded in the AMI under `/var/lib/docker` are hidden by the mount, which matters only for jobs that relied on them.
 
 ### BuildKit layer cache in S3
 

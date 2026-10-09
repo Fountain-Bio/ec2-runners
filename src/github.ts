@@ -69,13 +69,15 @@ export class GitHubClient {
     return this.installation;
   }
 
-  async generateJitConfig({ name, labels, runnerGroupId }: { name: string; labels: string[]; runnerGroupId: number }) {
+  // workFolder may be absolute; the runner resolves it against its install directory.
+  async generateJitConfig({ name, labels, runnerGroupId, workFolder }: { name: string; labels: string[]; runnerGroupId: number; workFolder: string }) {
     const gh = await this.octokit();
     const { data } = await gh.rest.actions.generateRunnerJitconfigForOrg({
       org: this.org,
       name,
       labels,
       runner_group_id: runnerGroupId,
+      work_folder: workFolder,
     });
     return data;
   }
@@ -104,6 +106,32 @@ export class GitHubClient {
       if (isGitHubError(err, 404) || isGitHubError(err, 403)) return undefined;
       throw err;
     }
+  }
+
+  // The repositories the app's installation can access.
+  async listRepositories() {
+    const gh = await this.octokit();
+    return gh.paginate(gh.rest.apps.listReposAccessibleToInstallation, { per_page: 100 });
+  }
+
+  // Jobs waiting for a runner in one repository's workflow runs created at or
+  // after `since`. A run whose jobs all wait is "queued", and a run with some
+  // jobs already running is "in_progress" while others can still wait.
+  async listQueuedJobs(repo: string, since: Date) {
+    const gh = await this.octokit();
+    const [owner = "", name = ""] = repo.split("/");
+    const created = `>=${since.toISOString()}`;
+    const runsByStatus = await Promise.all(
+      (["queued", "in_progress"] as const).map((status) =>
+        gh.paginate(gh.rest.actions.listWorkflowRunsForRepo, { owner, repo: name, status, created, exclude_pull_requests: true, per_page: 100 }),
+      ),
+    );
+    // A run can change status between the two lists and appear in both.
+    const runIds = new Set(runsByStatus.flat().map((run) => run.id));
+    const jobs = await Promise.all(
+      [...runIds].map((run_id) => gh.paginate(gh.rest.actions.listJobsForWorkflowRun, { owner, repo: name, run_id, filter: "latest", per_page: 100 })),
+    );
+    return jobs.flat().filter((job) => job.status === "queued");
   }
 
   async listRunners(namePrefix: string) {

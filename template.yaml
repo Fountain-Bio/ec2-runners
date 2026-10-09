@@ -563,7 +563,8 @@ Resources:
       Targets:
         - Id: janitor
           Arn: !GetAtt JanitorFunction.Arn
-        # Retries failed launches and replaces runners the janitor terminated.
+        # Retries failed launches, replaces runners the janitor terminated, and
+        # records queued jobs whose webhook never arrived.
         - Id: reconciler
           Arn: !GetAtt ReconcilerFunction.Arn
 
@@ -590,7 +591,7 @@ Resources:
     Properties:
       AlarmName: !Sub ${AWS::StackName}-webhook-errors
       AlarmDescription: >-
-        The webhook Lambda failed on a GitHub delivery, so that job was not recorded and GitHub does not retry it. Read /aws/lambda/<stack>-webhook, fix the cause, then redeliver from the GitHub App's Advanced tab.
+        The webhook Lambda failed on a GitHub delivery, and GitHub does not retry it. The next scheduled reconcile records the job if it is still queued. Read /aws/lambda/<stack>-webhook and fix the cause.
       Namespace: AWS/Lambda
       MetricName: Errors
       Dimensions: [{ Name: FunctionName, Value: !Ref WebhookFunction }]
@@ -608,7 +609,7 @@ Resources:
     Properties:
       AlarmName: !Sub ${AWS::StackName}-reconciler-errors
       AlarmDescription: >-
-        A reconcile failed before reaching any job, for example on a GitHub API or DynamoDB error. Queued jobs wait for the next successful run. Read /aws/lambda/<stack>-reconciler.
+        A reconcile failed before reaching any job, for example on a GitHub API or DynamoDB error, or the scheduled check for queued jobs whose webhook never arrived failed. Queued jobs wait for the next successful run. Read /aws/lambda/<stack>-reconciler.
       Namespace: AWS/Lambda
       MetricName: Errors
       Dimensions: [{ Name: FunctionName, Value: !Ref ReconcilerFunction }]
