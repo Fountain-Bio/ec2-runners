@@ -609,13 +609,18 @@ Resources:
     Properties:
       AlarmName: !Sub ${AWS::StackName}-reconciler-errors
       AlarmDescription: >-
-        A reconcile failed before reaching any job, for example on a GitHub API or DynamoDB error, or the scheduled check for queued jobs whose webhook never arrived failed. Queued jobs wait for the next successful run. Read /aws/lambda/<stack>-reconciler.
+        The reconciler has failed in each of the last three 5-minute periods, for example on GitHub API or DynamoDB errors, or in the scheduled check for queued jobs whose webhook never arrived. Queued jobs wait until a run succeeds. A single failure does not fire this alarm, because Lambda retries the invocation and the schedule runs again 5 minutes later. Read /aws/lambda/<stack>-reconciler.
       Namespace: AWS/Lambda
       MetricName: Errors
       Dimensions: [{ Name: FunctionName, Value: !Ref ReconcilerFunction }]
       Statistic: Sum
+      # The schedule invokes the reconciler every 5 minutes, and Lambda retries
+      # a failed invocation twice, so a lasting failure leaves errors in every
+      # period. One GitHub error that the retry or the next run gets past
+      # leaves errors in one period, which is not worth an alert.
       Period: 300
-      EvaluationPeriods: 1
+      EvaluationPeriods: 3
+      DatapointsToAlarm: 3
       Threshold: 1
       ComparisonOperator: GreaterThanOrEqualToThreshold
       TreatMissingData: notBreaching

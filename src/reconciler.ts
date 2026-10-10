@@ -78,7 +78,9 @@ export async function reconciler(event?: unknown, context?: Pick<Context, "getRe
   // Only the schedule backfills, so a burst of webhook invocations does not
   // query every repository once per job. A failed backfill still lets the
   // reconcile launch for the jobs already recorded, and is rethrown after it
-  // so the reconciler-errors alarm fires.
+  // so Lambda retries the invocation. The reconciler-errors alarm fires only
+  // when every 5-minute period for 15 minutes has a failure, so a one-off
+  // GitHub error that the retry or the next schedule gets past stays quiet.
   let backfillError: Error | undefined;
   if (isScheduledEvent(event)) {
     await backfillQueuedJobs(config).catch((err) => {
@@ -108,6 +110,12 @@ function isScheduledEvent(event: unknown): boolean {
 // GitHub for the jobs waiting in the installation's repositories and records
 // those with the trigger label. markQueued leaves existing rows alone, so
 // jobs the webhook recorded, and jobs already done or failed, are unchanged.
+//
+// Each repository's errors stay with that repository, so one failed request
+// never keeps the other repositories' jobs from being recorded. A repository
+// that answers 404 was deleted, transferred, or removed from the installation
+// since the list was read, and is skipped. Any other failure is thrown once
+// every repository has been tried.
 async function backfillQueuedJobs(config: ReconcilerConfig): Promise<void> {
   const jobs = jobStore(config.JOBS_TABLE);
   const gh = await github(config);
@@ -115,15 +123,28 @@ async function backfillQueuedJobs(config: ReconcilerConfig): Promise<void> {
   // The webhook ignores public repositories' jobs for the same reason (see webhook.ts).
   const repos = (await gh.listRepositories()).filter((r) => !r.archived && !r.disabled && (r.private || config.ALLOW_PUBLIC_REPOS));
   const recorded: { repo: string; jobId: number }[] = [];
+  const failed: { repo: string; error: string }[] = [];
   await forEachLimit(repos, BACKFILL_CONCURRENCY, async (repo) => {
-    for (const job of await gh.listQueuedJobs(repo.full_name, since)) {
-      if (!hasTriggerLabel(job.labels, config.TRIGGER_LABEL)) continue;
-      if (await jobs.markQueued({ jobId: job.id, repo: repo.full_name, runId: job.run_id, labels: job.labels })) {
-        recorded.push({ repo: repo.full_name, jobId: job.id });
+    try {
+      for (const job of await gh.listQueuedJobs(repo.full_name, since)) {
+        if (!hasTriggerLabel(job.labels, config.TRIGGER_LABEL)) continue;
+        if (await jobs.markQueued({ jobId: job.id, repo: repo.full_name, runId: job.run_id, labels: job.labels })) {
+          recorded.push({ repo: repo.full_name, jobId: job.id });
+        }
       }
+    } catch (err) {
+      if (isGitHubError(err, 404)) {
+        log("backfill skipped a repository the app can no longer read", { repo: repo.full_name });
+        return;
+      }
+      failed.push({ repo: repo.full_name, error: errorMessage(err) });
     }
   });
   if (recorded.length > 0) log("recorded queued jobs whose webhook never arrived", { jobs: recorded });
+  if (failed.length > 0) {
+    log("backfill failed for some repositories", { failed, repositories: repos.length });
+    throw new Error(`Backfill failed for ${failed.length} of ${repos.length} repositories: ${failed.map((f) => `${f.repo}: ${f.error}`).join("; ")}`);
+  }
 }
 
 // Runs passes until no launch failed for a reason a retry may get past, such

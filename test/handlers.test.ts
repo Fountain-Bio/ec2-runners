@@ -657,6 +657,24 @@ test("backfill waits out a short secondary rate limit and gives up on a long one
   expect(callsTo(repoList)).toBe(1);
 });
 
+test("backfill records other repositories' jobs when one repository fails, then fails the invocation", async () => {
+  backfillRoutes();
+  ghRoutes["GET /installation/repositories"] = { body: { total_count: 2, repositories: [repository("broken"), repository("monorepo")] } };
+  // No route for broken's run list, so GitHub keeps answering 500.
+  await expect(reconcilerHandler(scheduled)).rejects.toThrow(/Backfill failed for 1 of 2 repositories: example-org\/broken: /);
+  expect(table.get(701)?.status).toBe("queued");
+  expect(fleetCalls()).toHaveLength(1);
+});
+
+test("backfill skips a repository that answers 404", async () => {
+  backfillRoutes();
+  ghRoutes["GET /installation/repositories"] = { body: { total_count: 2, repositories: [repository("gone"), repository("monorepo")] } };
+  ghRoutes["GET /repos/example-org/gone/actions/runs"] = { status: 404, body: { message: "Not Found" } };
+  expect((await reconciler(scheduled)).outcomes).toEqual({ 701: "launched" });
+  // A 404 is not retried.
+  expect(callsTo("GET /repos/example-org/gone/actions/runs")).toBe(2);
+});
+
 test("a GitHub client error is not retried", async () => {
   queuedRow(555, ["ec2"]);
   ghRoutes["GET /repos/example-org/app/actions/jobs/555"] = { status: 403, body: { message: "Resource not accessible by integration" } };
