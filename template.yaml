@@ -334,8 +334,9 @@ Resources:
                 Condition:
                   StringEquals:
                     iam:AWSServiceName: [spot.amazonaws.com, ec2fleet.amazonaws.com]
+              # PutItem lets the backfill record a queued job whose webhook never arrived.
               - Effect: Allow
-                Action: [dynamodb:Scan, dynamodb:UpdateItem]
+                Action: [dynamodb:PutItem, dynamodb:Scan, dynamodb:UpdateItem]
                 Resource: !GetAtt JobsTable.Arn
               # Terminates spare runners whose job was cancelled before it started.
               - Effect: Allow
