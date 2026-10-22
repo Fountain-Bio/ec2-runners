@@ -107,7 +107,7 @@ jobs:
 
 ## Setup
 
-Requirements: AWS CLI v2 with admin credentials for the target account, [Bun](https://bun.com), and owner access to the GitHub org.
+Requirements: AWS CLI v2 with admin credentials for the target account, [Bun](https://bun.com) as the package manager, Node.js 24, and owner access to the GitHub org.
 
 ### 1. Deploy the stack
 
@@ -194,14 +194,15 @@ Pass overrides as `./deploy.sh Key=Value …`.
 
 ## Development
 
-The code is TypeScript, run directly by [Bun](https://bun.com) in development. GitHub calls and webhook payload types come from Octokit, whose retry and throttling plugins retry server errors and pace requests as GitHub recommends (at most 10 at once, and a second between writes), and Zod parses the environment, the app secret, and the rows read from the jobs table. The Lambdas run on the Node.js 24 runtime, so `deploy.sh` bundles `src/index.ts` and its dependencies, including the AWS SDK clients, into a single `index.mjs` with `bun build`.
+The code is TypeScript. The toolchain is [Vite+](https://viteplus.dev), configured in `vite.config.ts`, with Bun installing packages. GitHub calls and webhook payload types come from Octokit, whose retry and throttling plugins retry server errors and pace requests as GitHub recommends (at most 10 at once, and a second between writes), and Zod parses the environment, the app secret, and the rows read from the jobs table. The Lambdas run on the Node.js 24 runtime, so `deploy.sh` bundles `src/index.ts` and its dependencies, including the AWS SDK clients, into `.build/lambda` with `vp pack`. The bundle is `index.mjs` plus a few chunk files, and all three functions use the whole directory as their code.
 
 ```bash
 bun install
-bun test
+bun run check            # vp check: Oxfmt formatting, then Oxlint with type checking (Node types only)
+bun run fmt              # vp fmt: formats the code in place
+bun run test             # vp test: Vitest; plain `bun test` runs Bun's runner instead
 bun run test:integration # jobs table against DynamoDB Local; needs Docker
-bun run typecheck        # tsc, for src/ (Node types only) and test/ (Bun types)
-bun run build            # writes .build/lambda/index.mjs; deploy.sh runs this
+bun run build            # vp pack: writes .build/lambda; deploy.sh runs this
 bun run lint:template    # cfn-lint through uvx; needs uv
 ```
 

@@ -48,7 +48,10 @@ type IntKey = (typeof INT_KEYS)[number];
 const isIntKey = (key: string): key is IntKey => (INT_KEYS as readonly string[]).includes(key);
 
 function labelParts(labels: readonly string[]): string[] {
-  return labels.flatMap((l) => l.split("/")).map((p) => p.trim()).filter(Boolean);
+  return labels
+    .flatMap((l) => l.split("/"))
+    .map((p) => p.trim())
+    .filter(Boolean);
 }
 
 // Whether a job opted in. GitHub matches labels case-insensitively.
@@ -74,7 +77,10 @@ export function parseLabels(labels: readonly string[]): LaunchSpec {
       if (!Number.isSafeInteger(n) || n <= 0) throw new JobConfigError(`Label ${part}: expected a positive integer`);
       spec[key] = n;
     } else if (key === "family") {
-      spec.families = value.split("+").map((f) => f.trim()).filter(Boolean);
+      spec.families = value
+        .split("+")
+        .map((f) => f.trim())
+        .filter(Boolean);
     } else if (key === "image") {
       spec.image = value;
     } else if (key === "spot") {

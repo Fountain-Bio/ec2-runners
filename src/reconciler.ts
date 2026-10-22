@@ -13,14 +13,7 @@ import type { Context } from "aws-lambda";
 import { alert } from "./alerts.ts";
 import { github } from "./app-secret.ts";
 import { reconcilerConfig, type ReconcilerConfig } from "./config.ts";
-import {
-  assertInstanceTypesExist,
-  launchRunner,
-  listRunnerInstances,
-  resolveAmi,
-  terminateInstances,
-  type Ami,
-} from "./ec2.ts";
+import { assertInstanceTypesExist, launchRunner, listRunnerInstances, resolveAmi, terminateInstances, type Ami } from "./ec2.ts";
 import { isGitHubError, type GitHubClient, type RunnerDownload } from "./github.ts";
 import { jobStore, type JobStore, type QueuedJob } from "./jobs.ts";
 import { JobConfigError, hasTriggerLabel, parseLabels } from "./labels.ts";

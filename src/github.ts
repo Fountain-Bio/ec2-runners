@@ -132,7 +132,17 @@ export class GitHubClient {
   }
 
   // workFolder may be absolute; the runner resolves it against its install directory.
-  async generateJitConfig({ name, labels, runnerGroupId, workFolder }: { name: string; labels: string[]; runnerGroupId: number; workFolder: string }) {
+  async generateJitConfig({
+    name,
+    labels,
+    runnerGroupId,
+    workFolder,
+  }: {
+    name: string;
+    labels: string[];
+    runnerGroupId: number;
+    workFolder: string;
+  }) {
     const gh = await this.octokit();
     const { data } = await gh.rest.actions.generateRunnerJitconfigForOrg({
       org: this.org,
@@ -191,7 +201,9 @@ export class GitHubClient {
     // A run can change status between the two lists and appear in both.
     const runIds = new Set(runsByStatus.flat().map((run) => run.id));
     const jobs = await Promise.all(
-      [...runIds].map((run_id) => gh.paginate(gh.rest.actions.listJobsForWorkflowRun, { owner, repo: name, run_id, filter: "latest", per_page: 100 })),
+      [...runIds].map((run_id) =>
+        gh.paginate(gh.rest.actions.listJobsForWorkflowRun, { owner, repo: name, run_id, filter: "latest", per_page: 100 }),
+      ),
     );
     return jobs.flat().filter((job) => job.status === "queued");
   }
@@ -213,9 +225,7 @@ export class GitHubClient {
     const gh = await this.octokit();
     const repo = { owner: "actions", repo: "runner" };
     const { data: release } =
-      version === "latest"
-        ? await gh.rest.repos.getLatestRelease(repo)
-        : await gh.rest.repos.getReleaseByTag({ ...repo, tag: `v${version}` });
+      version === "latest" ? await gh.rest.repos.getLatestRelease(repo) : await gh.rest.repos.getReleaseByTag({ ...repo, tag: `v${version}` });
     const resolved = release.tag_name.replace(/^v/, "");
     const filename = `actions-runner-linux-${arch}-${resolved}.tar.gz`;
     const asset = release.assets.find((a) => a.name === filename);

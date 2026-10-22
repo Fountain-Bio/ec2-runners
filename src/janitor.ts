@@ -26,10 +26,7 @@ export async function janitor(): Promise<{ terminated: string[]; removedRunners:
   const maxMs = config.MAX_MINUTES * 60_000 + LIFETIME_GRACE_MS;
   const gh = await github(config);
 
-  const [allInstances, runners] = await Promise.all([
-    listRunnerInstances(ec2, config.RUNNER_PREFIX),
-    gh.listRunners(`${config.RUNNER_PREFIX}-`),
-  ]);
+  const [allInstances, runners] = await Promise.all([listRunnerInstances(ec2, config.RUNNER_PREFIX), gh.listRunners(`${config.RUNNER_PREFIX}-`)]);
   const runnersByName = new Map(runners.map((r) => [r.name, r]));
   const instances = allInstances.filter((i) => i.state === "pending" || i.state === "running");
 

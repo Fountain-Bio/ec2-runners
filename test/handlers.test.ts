@@ -1,4 +1,4 @@
-import { beforeEach, expect, test } from "bun:test";
+import { beforeEach, expect, test } from "vite-plus/test";
 import { createHmac, generateKeyPairSync } from "node:crypto";
 import { ConditionalCheckFailedException } from "@aws-sdk/client-dynamodb";
 import { EC2Client } from "@aws-sdk/client-ec2";
@@ -132,14 +132,21 @@ Object.assign(globalThis, {
   fetch: async (url: string, init: RequestInit = {}) => {
     const { pathname, search } = new URL(url);
     const key = `${init.method ?? "GET"} ${pathname}`;
-    const body = init.body ? JSON.parse(String(init.body)) : undefined;
+    // Octokit sends JSON request bodies as strings.
+    const body = typeof init.body === "string" ? JSON.parse(init.body) : undefined;
     ghCalls.push({ key, search, body });
     const listed = ghRoutes[key];
     const route = Array.isArray(listed) ? (listed.length > 1 ? listed.shift() : listed[0]) : listed;
     const status = route?.status ?? 200;
     let responseBody = route?.body as any;
     if (key === "POST /orgs/example-org/actions/runners/generate-jitconfig" && status === 201) {
-      registered.push({ id: responseBody.runner.id, name: body.name, busy: false, status: "offline", labels: body.labels.map((name: string) => ({ name })) });
+      registered.push({
+        id: responseBody.runner.id,
+        name: body.name,
+        busy: false,
+        status: "offline",
+        labels: body.labels.map((name: string) => ({ name })),
+      });
     }
     const deleted = /^DELETE \/orgs\/example-org\/actions\/runners\/(\d+)$/.exec(key);
     if (deleted && status === 204) registered = registered.filter((r) => r.id !== Number(deleted[1]));
@@ -264,7 +271,11 @@ function delivery(eventName: string, payload: object, { secret = WEBHOOK_SECRET,
   } as Partial<LambdaFunctionURLEvent> as LambdaFunctionURLEvent;
 }
 
-const jobEvent = (action: string, labels: string[], { org = "example-org", isPrivate = true, id = 555, runnerName = null as string | null } = {}) => ({
+const jobEvent = (
+  action: string,
+  labels: string[],
+  { org = "example-org", isPrivate = true, id = 555, runnerName = null as string | null } = {},
+) => ({
   action,
   organization: { login: org },
   repository: { full_name: `${org}/app`, private: isPrivate },
@@ -367,9 +378,7 @@ test("reconciler launches a runner for a queued job with none available", async 
   expect(script).toMatch(/JIT_CONFIG='JITCFG'/);
   expect(script).toContain(`RUNNER_SHA256='${RUNNER_SHA256}'`);
   expect(script).toContain("actions-runner-linux-x64-2.338.0.tar.gz");
-  const tags = Object.fromEntries(
-    version.LaunchTemplateData.TagSpecifications[0].Tags.map((t: { Key: string; Value: string }) => [t.Key, t.Value]),
-  );
+  const tags = Object.fromEntries(version.LaunchTemplateData.TagSpecifications[0].Tags.map((t: { Key: string; Value: string }) => [t.Key, t.Value]));
   expect(tags).toMatchObject({
     "ec2-runners:stack": PREFIX,
     "ec2-runners:runner-name": jit.body.name,
@@ -379,7 +388,9 @@ test("reconciler launches a runner for a queued job with none available", async 
   expect(fleetCalls()).toHaveLength(1);
   // The stack's CPU floor reaches both the instance type check and the fleet.
   const floor = { Cpu: { References: [{ InstanceFamily: "m6i" }] } };
-  expect(awsCalls.find((c) => c.name === "GetInstanceTypesFromInstanceRequirementsCommand")!.input.InstanceRequirements.BaselinePerformanceFactors).toEqual(floor);
+  expect(
+    awsCalls.find((c) => c.name === "GetInstanceTypesFromInstanceRequirementsCommand")!.input.InstanceRequirements.BaselinePerformanceFactors,
+  ).toEqual(floor);
   expect(fleetCalls()[0]!.input.LaunchTemplateConfigs[0].Overrides[0].InstanceRequirements.BaselinePerformanceFactors).toEqual(floor);
 });
 
@@ -597,7 +608,7 @@ test("scheduled reconcile records queued jobs whose webhook never arrived, and l
   expect(table.get(704)?.status).toBe("done");
 
   const runLists = ghCalls.filter((c) => c.key === "GET /repos/example-org/monorepo/actions/runs").map((c) => new URLSearchParams(c.search));
-  expect(runLists.map((q) => q.get("status")).sort()).toEqual(["in_progress", "queued"]);
+  expect(runLists.map((q) => q.get("status") ?? "").sort((a, b) => a.localeCompare(b))).toEqual(["in_progress", "queued"]);
   expect(runLists[0]!.get("created")).toMatch(/^>=\d{4}-\d\d-\d\dT/);
   // The run's jobs are listed once, and public and archived repositories are skipped.
   expect(ghCalls.filter((c) => c.key === "GET /repos/example-org/monorepo/actions/runs/900/jobs")).toHaveLength(1);
@@ -637,7 +648,11 @@ const callsTo = (key: string) => ghCalls.filter((c) => c.key === key).length;
 test("backfill retries a GitHub server error", async () => {
   backfillRoutes();
   const jobsList = "GET /repos/example-org/monorepo/actions/runs/900/jobs";
-  ghRoutes[jobsList] = [{ status: 502, body: { message: "Server Error" } }, { status: 503, body: { message: "Unavailable" } }, ghRoutes[jobsList] as Route];
+  ghRoutes[jobsList] = [
+    { status: 502, body: { message: "Server Error" } },
+    { status: 503, body: { message: "Unavailable" } },
+    ghRoutes[jobsList] as Route,
+  ];
 
   expect((await reconciler(scheduled)).outcomes).toEqual({ 701: "launched" });
   expect(callsTo(jobsList)).toBe(3);
@@ -682,7 +697,6 @@ test("a GitHub client error is not retried", async () => {
   // One lookup in each of the invocation's six passes.
   expect(callsTo("GET /repos/example-org/app/actions/jobs/555")).toBe(6);
 });
-
 
 test("janitor terminates idle and expired instances and removes stale registrations", async () => {
   const name = (jobId: number, minutesAgo = 60) => runnerName(PREFIX, jobId, Date.now() - minutesAgo * 60_000);

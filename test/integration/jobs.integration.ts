@@ -1,10 +1,9 @@
 // Runs JobStore and ReconcileLock against DynamoDB Local in Docker, so the
 // conditional writes, the strongly consistent scan, and the ADD counter are
-// checked against the real DynamoDB engine. Needs Docker. Run with `bun run test:integration`.
-//
-// The file name lacks ".test", so plain `bun test` skips it.
+// checked against the real DynamoDB engine. Needs Docker. Run with `bun run test:integration`,
+// which sets INTEGRATION so vite.config.ts includes this file instead of the unit tests.
 
-import { afterAll, beforeAll, expect, test } from "bun:test";
+import { afterAll, beforeAll, expect, test } from "vite-plus/test";
 import { execFileSync } from "node:child_process";
 import { CreateTableCommand, DynamoDBClient, ListTablesCommand } from "@aws-sdk/client-dynamodb";
 import { DynamoDBDocumentClient, GetCommand, PutCommand } from "@aws-sdk/lib-dynamodb";
@@ -18,37 +17,32 @@ let containerId = "";
 let client: DynamoDBClient;
 let store: JobStore;
 
-beforeAll(
-  async () => {
-    // Publishes the container's port 8000 on a free localhost port.
-    containerId = execFileSync(
-      "docker",
-      ["run", "--detach", "--rm", "--publish", "127.0.0.1::8000", IMAGE, "-jar", "DynamoDBLocal.jar", "-inMemory"],
-      { encoding: "utf8" },
-    ).trim();
-    const hostPort = execFileSync("docker", ["port", containerId, "8000/tcp"], { encoding: "utf8" }).trim().split("\n")[0];
+beforeAll(async () => {
+  // Publishes the container's port 8000 on a free localhost port.
+  containerId = execFileSync("docker", ["run", "--detach", "--rm", "--publish", "127.0.0.1::8000", IMAGE, "-jar", "DynamoDBLocal.jar", "-inMemory"], {
+    encoding: "utf8",
+  }).trim();
+  const hostPort = execFileSync("docker", ["port", containerId, "8000/tcp"], { encoding: "utf8" }).trim().split("\n")[0];
 
-    // DynamoDB Local accepts any credentials.
-    client = new DynamoDBClient({
-      endpoint: `http://${hostPort}`,
-      region: "us-west-2",
-      credentials: { accessKeyId: "local", secretAccessKey: "local" },
-    });
-    await waitUntilReady(client);
+  // DynamoDB Local accepts any credentials.
+  client = new DynamoDBClient({
+    endpoint: `http://${hostPort}`,
+    region: "us-west-2",
+    credentials: { accessKeyId: "local", secretAccessKey: "local" },
+  });
+  await waitUntilReady(client);
 
-    // The same key schema as JobsTable in template.yaml.
-    await client.send(
-      new CreateTableCommand({
-        TableName: TABLE,
-        BillingMode: "PAY_PER_REQUEST",
-        AttributeDefinitions: [{ AttributeName: "jobId", AttributeType: "N" }],
-        KeySchema: [{ AttributeName: "jobId", KeyType: "HASH" }],
-      }),
-    );
-    store = new JobStore(client, TABLE);
-  },
-  { timeout: 120_000 },
-);
+  // The same key schema as JobsTable in template.yaml.
+  await client.send(
+    new CreateTableCommand({
+      TableName: TABLE,
+      BillingMode: "PAY_PER_REQUEST",
+      AttributeDefinitions: [{ AttributeName: "jobId", AttributeType: "N" }],
+      KeySchema: [{ AttributeName: "jobId", KeyType: "HASH" }],
+    }),
+  );
+  store = new JobStore(client, TABLE);
+}, 120_000);
 
 afterAll(() => {
   if (containerId) execFileSync("docker", ["rm", "--force", containerId]);

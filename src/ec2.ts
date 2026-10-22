@@ -23,7 +23,6 @@ const TAG_RUNNER = "ec2-runners:runner-name";
 const TAG_REPO = "ec2-runners:repo";
 const TAG_RUN = "ec2-runners:run-id";
 
-
 // The send() method is all this module needs from EC2Client, so tests can pass
 // a plain object in its place.
 export type Ec2 = Pick<EC2Client, "send">;
@@ -117,9 +116,7 @@ function fleetRequest({
       TotalTargetCapacity: 1,
       DefaultTargetCapacityType: spot ? "spot" : "on-demand",
     },
-    ...(spot
-      ? { SpotOptions: { AllocationStrategy: "price-capacity-optimized" } }
-      : { OnDemandOptions: { AllocationStrategy: "lowest-price" } }),
+    ...(spot ? { SpotOptions: { AllocationStrategy: "price-capacity-optimized" } } : { OnDemandOptions: { AllocationStrategy: "lowest-price" } }),
     LaunchTemplateConfigs: [
       {
         LaunchTemplateSpecification: { LaunchTemplateId: launchTemplateId, Version: String(version) },
@@ -207,9 +204,7 @@ export async function launchRunner(ec2: Ec2, opts: LaunchOptions): Promise<Launc
     // Spot in every subnet first, then on-demand in every subnet.
     for (const spot of spec.spot ? [true, false] : [false]) {
       for (const subnetId of shuffled(subnetIds, random)) {
-        const res = await ec2.send(
-          new CreateFleetCommand(fleetRequest({ launchTemplateId, version, subnetId, spec, spot })),
-        );
+        const res = await ec2.send(new CreateFleetCommand(fleetRequest({ launchTemplateId, version, subnetId, spec, spot })));
         const instance = res.Instances?.find((i) => i.InstanceIds?.length);
         const instanceId = instance?.InstanceIds?.[0];
         if (instance && instanceId) {
@@ -249,9 +244,7 @@ export async function listRunnerInstances(ec2: Ec2, stackName: string): Promise<
   do {
     const res = await ec2.send(
       new DescribeInstancesCommand({
-        Filters: [
-          { Name: `tag:${TAG_STACK}`, Values: [stackName] },
-        ],
+        Filters: [{ Name: `tag:${TAG_STACK}`, Values: [stackName] }],
         NextToken,
       }),
     );

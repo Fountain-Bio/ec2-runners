@@ -96,9 +96,7 @@ export interface AvailableRunner {
 
 export function availableRunners(snapshot: PoolSnapshot): AvailableRunner[] {
   return classifyRunners(snapshot).flatMap(({ registration: r, state, instanceId }) =>
-    state === "live" || state === "launching"
-      ? [{ id: r.id, name: r.name, labels: r.labels.map((l) => l.name), state, instanceId }]
-      : [],
+    state === "live" || state === "launching" ? [{ id: r.id, name: r.name, labels: r.labels.map((l) => l.name), state, instanceId }] : [],
   );
 }
 

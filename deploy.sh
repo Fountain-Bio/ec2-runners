@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Bundles the Lambda code and deploys the stack. Needs bun and the AWS CLI.
+# Bundles the Lambda code and deploys the stack. Needs bun, Node.js 24, and the AWS CLI.
 #
 #   ./deploy.sh                      # stack "ec2-runners" in us-west-2, or AWS_REGION when set
 #   STACK=ci-runners ./deploy.sh GitHubOrg=example-org IdleMinutes=15
@@ -27,7 +27,7 @@ if ! aws s3api head-bucket --bucket "$ARTIFACTS" 2>/dev/null; then
     --public-access-block-configuration BlockPublicAcls=true,IgnorePublicAcls=true,BlockPublicPolicy=true,RestrictPublicBuckets=true
 fi
 
-# Bundles src/index.ts into .build/lambda/index.mjs, which template.yaml uses
+# Bundles src/index.ts into .build/lambda (index.mjs and its chunks), which template.yaml uses
 # as the code for all three functions.
 bun install --frozen-lockfile
 bun run build

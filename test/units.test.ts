@@ -1,4 +1,4 @@
-import { expect, test } from "bun:test";
+import { expect, test } from "vite-plus/test";
 import { createHmac } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { mkdtempSync, writeFileSync } from "node:fs";
@@ -113,7 +113,7 @@ test("buildUserData produces valid bash with the JIT config and cache settings",
   expect(script).not.toMatch(/ecr/i);
   expect(script).toContain(`RUNNER_SHA256='${runner.sha256}'`);
   expect(script).toContain(`RUNNER_URL='${runner.url}'`);
-  expect(script).toContain('sha256sum -c -');
+  expect(script).toContain("sha256sum -c -");
   expect(script).toContain("RUNNER_NAME='ec2-runners-555-mabc'");
   expect(script).toContain("BOOT_LOG_GROUP='/ec2-runners/ec2-runners/boot'");
   expect(script).toContain("trap 'exit 143' TERM");
@@ -125,7 +125,10 @@ test("buildUserData produces valid bash with the JIT config and cache settings",
 });
 
 test("buildUserData quotes values containing single quotes", () => {
-  const script = Buffer.from(buildUserData({ jitConfig: "a'b", cacheBucket: "c", region: "r", maxMinutes: 10, runner, runnerName: "n", bootLogGroup: "g" }), "base64").toString();
+  const script = Buffer.from(
+    buildUserData({ jitConfig: "a'b", cacheBucket: "c", region: "r", maxMinutes: 10, runner, runnerName: "n", bootLogGroup: "g" }),
+    "base64",
+  ).toString();
   expect(script).toMatch(/JIT_CONFIG='a'\\''b'/);
 });
 
@@ -353,7 +356,10 @@ test("classifyRunners treats an ended instance and an overdue launch as stale", 
 
 test("matchJobs needs no launch when two jobs swap runners", () => {
   // Jobs 1 and 2 both asked for [ec2]; each runner can take either job.
-  const jobs = [{ id: 1, labels: ["ec2"] }, { id: 2, labels: ["ec2"] }];
+  const jobs = [
+    { id: 1, labels: ["ec2"] },
+    { id: 2, labels: ["ec2"] },
+  ];
   expect(matchJobs(jobs, [{ labels: ["ec2"] }, { labels: ["ec2"] }]).uncovered).toEqual([]);
 });
 

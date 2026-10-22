@@ -1,9 +1,10 @@
 {
-  // Typechecks the Lambda source. Bun runs and bundles the .ts files directly,
-  // so tsc only checks types and never writes output.
+  // Type-checks the Lambda source, the tests, and vite.config.ts through
+  // `vp check`. Vite+ bundles and runs the .ts files directly, so TypeScript
+  // never writes output.
   "compilerOptions": {
-    // The Lambdas run on Node.js 24. Only Node's types are loaded here, so code
-    // in src/ cannot call Bun-only APIs that would fail in Lambda.
+    // The Lambdas run on Node.js 24, and the tests run on Node.js under
+    // Vitest. Only Node's types are loaded.
     "lib": ["ES2025"],
     "target": "ES2025",
     "types": ["node"],
@@ -21,5 +22,5 @@
     "noUncheckedIndexedAccess": true,
     "noImplicitOverride": true
   },
-  "include": ["src"]
+  "include": ["src", "test", "vite.config.ts"]
 }

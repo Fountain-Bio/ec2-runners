@@ -14,16 +14,20 @@ jobs:
     steps:
       - uses: actions/checkout@v7.0.1
 
-      - uses: oven-sh/setup-bun@v2.2.0
+      # Installs vp and Node.js 24, the Lambda runtime's version. vp provides
+      # bun at the version in package.json's packageManager field.
+      - uses: voidzero-dev/setup-vp@v1.21.2
         with:
-          bun-version: 1.4.2
+          node-version: "24"
+          cache: true
+          run-install: false
 
       # Runs cfn-lint for `bun run lint:template`.
       - uses: astral-sh/setup-uv@v10.2.0
 
       - run: bun install --frozen-lockfile
-      - run: bun run typecheck
-      - run: bun test
+      - run: bun run check
+      - run: bun run test
       # Starts DynamoDB Local in Docker.
       - run: bun run test:integration
       - run: bun run build

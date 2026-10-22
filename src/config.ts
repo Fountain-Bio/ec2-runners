@@ -39,7 +39,10 @@ const ReconcilerConfig = z.object({
   RUNNER_GROUP_ID: z.coerce.number().int().positive(),
   LAUNCH_TEMPLATE_ID: z.string().min(1),
   LAUNCH_TEMPLATE_VERSION: z.string().min(1),
-  SUBNET_IDS: z.string().min(1).transform((s) => s.split(",")),
+  SUBNET_IDS: z
+    .string()
+    .min(1)
+    .transform((s) => s.split(",")),
   CACHE_BUCKET: z.string().min(1),
   MAX_MINUTES: z.coerce.number().positive(),
   AMI_OWNER: z.string().min(1),

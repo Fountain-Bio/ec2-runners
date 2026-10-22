@@ -1,21 +1,15 @@
 {
   "name": "ec2-runners",
   "private": true,
-  "type": "module",
   "description": "Ephemeral GitHub Actions runners on EC2 Spot, deployed as one CloudFormation stack.",
+  "type": "module",
   "scripts": {
-    "test": "bun test",
-    "test:integration": "bun test ./test/integration/jobs.integration.ts",
-    "typecheck": "tsc --noEmit && tsc --noEmit -p test",
-    "build": "bun build src/index.ts --target=node --format=esm --minify-whitespace --minify-syntax --outfile .build/lambda/index.mjs",
+    "check": "vp check",
+    "fmt": "vp fmt",
+    "test": "vp test run",
+    "test:integration": "INTEGRATION=1 vp test run",
+    "build": "vp pack",
     "lint:template": "uvx cfn-lint@1.57.2 template.yaml --ignore-checks W3002 --regions us-west-2"
-  },
-  "devDependencies": {
-    "@octokit/openapi-webhooks-types": "12.2.0",
-    "@types/aws-lambda": "8.10.164",
-    "@types/bun": "1.4.2",
-    "@types/node": "24.19.1",
-    "typescript": "7.0.2"
   },
   "dependencies": {
     "@aws-sdk/client-dynamodb": "3.1147.0",
@@ -32,5 +26,12 @@
     "@octokit/webhooks-methods": "6.0.0",
     "bottleneck": "2.19.5",
     "zod": "4.6.5"
-  }
+  },
+  "devDependencies": {
+    "@octokit/openapi-webhooks-types": "12.2.0",
+    "@types/aws-lambda": "8.10.164",
+    "@types/node": "24.19.1",
+    "vite-plus": "1.3.0"
+  },
+  "packageManager": "bun@1.4.3"
 }
