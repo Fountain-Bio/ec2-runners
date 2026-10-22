@@ -118,6 +118,9 @@ test("buildUserData produces valid bash with the JIT config and cache settings",
   expect(script).toContain("BOOT_LOG_GROUP='/ec2-runners/ec2-runners/boot'");
   expect(script).toContain("trap 'exit 143' TERM");
   expect(script).toMatch(/finish\(\) \{\n(?:  #.*\n)*  exec >>\/var\/log\/ec2-runner-boot\.log 2>&1\n/);
+  // The boot log timestamps each step, starting before anything slow runs.
+  expect(script).toMatch(/^stage\(\) \{ echo "\$\(date -u \+%Y-%m-%dT%H:%M:%S\.%3NZ\) \$\*"; \}\nstage "boot script started; /m);
+  expect(script.indexOf('stage "starting runner"')).toBeLessThan(script.indexOf("run.sh --jitconfig"));
   const dir = mkdtempSync(join(tmpdir(), "userdata-"));
   const file = join(dir, "boot.sh");
   writeFileSync(file, script);

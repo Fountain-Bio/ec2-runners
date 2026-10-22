@@ -36,6 +36,13 @@ export function buildUserData({ jitConfig, cacheBucket, region, maxMinutes, runn
 set -euo pipefail
 exec > >(tee -a /var/log/ec2-runner-boot.log) 2>&1
 
+# Logs a message prefixed with the UTC time in milliseconds. Each step of the
+# boot logs one, so the boot log shows how the time from launch to the
+# runner listening for its job divides between steps. The kernel's uptime at
+# the first line separates the OS boot from EC2 starting the instance.
+stage() { echo "$(date -u +%Y-%m-%dT%H:%M:%S.%3NZ) $*"; }
+stage "boot script started; kernel up $(cut -d' ' -f1 /proc/uptime)s"
+
 # Hard cap on instance lifetime, in case the job or the runner hangs.
 shutdown -h +${Number(maxMinutes)} "ec2-runners max lifetime reached" || true
 
@@ -72,7 +79,7 @@ finish() {
   # also stops the tee process above, and an echo into its closed pipe would
   # kill this script with SIGPIPE before the upload.
   exec >>/var/log/ec2-runner-boot.log 2>&1
-  echo "runner exited; powering off"
+  stage "runner exited; powering off"
   upload_boot_log || echo "boot log upload failed"
   shutdown -h now
 }
@@ -99,7 +106,7 @@ setup_instance_store() {
   else
     dev="\${disks[0]}"
   fi
-  echo "using instance store \${dev} (\${#disks[@]} disk(s))"
+  stage "using instance store \${dev} (\${#disks[@]} disk(s))"
   # The caller runs this function as an if condition, where set -e does not
   # apply, so every step that matters returns on failure explicitly.
   mkfs.ext4 -F -q -m 0 -E nodiscard "$dev" || return 1
@@ -108,8 +115,10 @@ setup_instance_store() {
   mountpoint -q /mnt/nvme || return 1
   mkdir -p /mnt/nvme/docker /mnt/nvme/containerd /mnt/nvme/work /mnt/nvme/tmp
   chmod 1777 /mnt/nvme/tmp
+  stage "instance store formatted and mounted"
 
   systemctl stop docker.socket docker.service containerd.service 2>/dev/null || true
+  stage "Docker stopped"
   mkdir -p /var/lib/docker /var/lib/containerd
   mount --bind /mnt/nvme/docker /var/lib/docker || return 1
   mount --bind /mnt/nvme/containerd /var/lib/containerd || return 1
@@ -118,8 +127,9 @@ setup_instance_store() {
 NVME=false
 if setup_instance_store; then
   NVME=true
+  stage "instance store ready"
 else
-  echo "instance store not used; Docker and the work directory stay on the root volume"
+  stage "instance store not used; Docker and the work directory stay on the root volume"
 fi
 
 if ! id runner >/dev/null 2>&1; then
@@ -133,10 +143,14 @@ getent group docker >/dev/null && usermod -aG docker runner
 # fails on a mismatch, and set -e then powers the instance off.
 if [ ! -x "$RUNNER_DIR/run.sh" ]; then
   mkdir -p "$RUNNER_DIR"
+  stage "downloading runner"
   curl -fsSL -o /tmp/actions-runner.tar.gz "$RUNNER_URL"
+  stage "runner downloaded"
   echo "$RUNNER_SHA256  /tmp/actions-runner.tar.gz" | sha256sum -c -
+  stage "runner checksum verified"
   tar -xzf /tmp/actions-runner.tar.gz -C "$RUNNER_DIR"
   rm -f /tmp/actions-runner.tar.gz
+  stage "runner extracted"
 fi
 
 # The JIT config points the runner's work folder at WORK_DIR.
@@ -187,13 +201,17 @@ chown -R runner:runner "$RUNNER_DIR"
 # Start Docker (it was stopped if the instance store was mounted) and wait for
 # it, so the job's first docker command does not race daemon startup.
 if command -v docker >/dev/null 2>&1; then
+  stage "starting Docker"
   systemctl start containerd.service 2>/dev/null || true
   systemctl start docker.service 2>/dev/null || true
-  for _ in $(seq 1 30); do docker info >/dev/null 2>&1 && break; sleep 1; done
+  DOCKER_READY=false
+  for _ in $(seq 1 30); do docker info >/dev/null 2>&1 && DOCKER_READY=true && break; sleep 1; done
+  stage "Docker ready: $DOCKER_READY"
 fi
 
 # A login shell picks up /etc/environment, where the GitHub-style images set PATH.
 # The JIT config is base64, so single quotes are safe around it.
+stage "starting runner"
 sudo -iu runner bash -c "cd '$RUNNER_DIR' && ./run.sh --jitconfig '$JIT_CONFIG'" || echo "run.sh exited with status $?"
 `;
   return Buffer.from(script).toString("base64");
