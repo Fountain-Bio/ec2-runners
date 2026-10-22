@@ -132,6 +132,16 @@ else
   stage "instance store not used; Docker and the work directory stay on the root volume"
 fi
 
+# Start Docker (it was stopped if the instance store was mounted) without
+# waiting for it. Its startup takes several seconds and overlaps the runner
+# install below. The script waits for Docker just before it starts the runner.
+HAS_DOCKER=false
+if command -v docker >/dev/null 2>&1; then
+  HAS_DOCKER=true
+  stage "starting Docker"
+  systemctl start --no-block containerd.service docker.service 2>/dev/null || true
+fi
+
 if ! id runner >/dev/null 2>&1; then
   useradd -m -s /bin/bash runner
   echo "runner ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/runner
@@ -198,14 +208,12 @@ if [ "$NVME" = true ]; then
 fi
 chown -R runner:runner "$RUNNER_DIR"
 
-# Start Docker (it was stopped if the instance store was mounted) and wait for
-# it, so the job's first docker command does not race daemon startup.
-if command -v docker >/dev/null 2>&1; then
-  stage "starting Docker"
-  systemctl start containerd.service 2>/dev/null || true
-  systemctl start docker.service 2>/dev/null || true
+# Wait up to 30 seconds for the Docker daemon started above, so the job's
+# first docker command does not race daemon startup.
+if [ "$HAS_DOCKER" = true ]; then
+  stage "waiting for Docker"
   DOCKER_READY=false
-  for _ in $(seq 1 30); do docker info >/dev/null 2>&1 && DOCKER_READY=true && break; sleep 1; done
+  for _ in $(seq 1 150); do docker info >/dev/null 2>&1 && DOCKER_READY=true && break; sleep 0.2; done
   stage "Docker ready: $DOCKER_READY"
 fi
 

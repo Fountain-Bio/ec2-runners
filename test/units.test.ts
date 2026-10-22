@@ -121,6 +121,13 @@ test("buildUserData produces valid bash with the JIT config and cache settings",
   // The boot log timestamps each step, starting before anything slow runs.
   expect(script).toMatch(/^stage\(\) \{ echo "\$\(date -u \+%Y-%m-%dT%H:%M:%S\.%3NZ\) \$\*"; \}\nstage "boot script started; /m);
   expect(script.indexOf('stage "starting runner"')).toBeLessThan(script.indexOf("run.sh --jitconfig"));
+  // Docker starts after its directories are mounted and before the runner
+  // install, and the script waits for it before starting the runner.
+  const dockerStart = script.indexOf("systemctl start --no-block containerd.service docker.service");
+  expect(dockerStart).toBeGreaterThan(script.indexOf("mount --bind /mnt/nvme/containerd /var/lib/containerd"));
+  expect(dockerStart).toBeLessThan(script.indexOf("curl -fsSL -o /tmp/actions-runner.tar.gz"));
+  expect(script.indexOf("docker info")).toBeGreaterThan(script.indexOf("tar -xzf"));
+  expect(script.indexOf("docker info")).toBeLessThan(script.indexOf("run.sh --jitconfig"));
   const dir = mkdtempSync(join(tmpdir(), "userdata-"));
   const file = join(dir, "boot.sh");
   writeFileSync(file, script);
