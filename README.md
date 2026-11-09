@@ -85,7 +85,9 @@ When the instance type has instance-store SSDs, the boot script formats them (st
 
 ### BuildKit layer cache in S3
 
-BuildKit stores layer cache in the stack's S3 bucket with `type=s3`. The default `docker` build driver cannot export cache, so the build needs a `docker-container` builder, which `docker/setup-buildx-action` creates. Buildx reads the instance-profile credentials on the host and passes them to BuildKit, so no AWS keys are needed.
+The `docker-cache` action in this repository (`actions/docker-cache`) gives a build its `cache-from` and `cache-to` values, so a workflow caches image layers without knowing the bucket, region, or key layout. On these runners the cache lives in the stack's S3 bucket under `buildkit/<owner>/<repo>/`. On any other runner both outputs are empty, and the build runs without a cache.
+
+The default `docker` build driver cannot export cache, so the build needs a `docker-container` builder, which `docker/setup-buildx-action` creates. Buildx reads the instance-profile credentials on the host and passes them to BuildKit, so no AWS keys are needed.
 
 ```yaml
 jobs:
@@ -94,16 +96,29 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - uses: docker/setup-buildx-action@v4
+      - id: cache
+        uses: Fountain-Bio/ec2-runners/actions/docker-cache@<commit SHA>
+        with:
+          name: app
       - uses: docker/build-push-action@v7
         with:
           context: .
           push: true
           tags: your-registry/app:${{ github.sha }}
-          cache-from: type=s3,region=${{ env.EC2_RUNNER_REGION }},bucket=${{ env.EC2_RUNNER_CACHE_BUCKET }},prefix=buildkit/${{ github.repository }}/,name=app
-          cache-to: type=s3,region=${{ env.EC2_RUNNER_REGION }},bucket=${{ env.EC2_RUNNER_CACHE_BUCKET }},prefix=buildkit/${{ github.repository }}/,name=app,mode=max,ignore-error=true
+          cache-from: ${{ steps.cache.outputs.cache-from }}
+          cache-to: ${{ steps.cache.outputs.cache-to }}
 ```
 
-`mode=max` caches the layers of every build stage, which is what makes multi-stage builds skip unchanged stages. BuildKit refreshes the timestamps of layers it reuses once a day, so the bucket's 10-day expiry removes only layers that no build has used recently. `ignore-error=true` keeps a cache upload failure from failing the build. Use a different `name` for each image built from the same repository.
+A bake build sets the same outputs per target through `docker/bake-action`'s `set` input, for example `app.cache-from=${{ steps.cache.outputs.cache-from }}`. A build for a pull request should use `cache-from` alone, so it reads the main branch's cache and cannot replace it.
+
+The action takes two inputs:
+
+- `name` (required) is the cache entry name. Use a different `name` for each image built from the same repository, or the images overwrite each other's cache.
+- `mode` is `max` by default, which caches the layers of every build stage and lets multi-stage builds skip unchanged stages. `min` caches only the final image's layers, which uploads less when an intermediate stage is large and cheap to rebuild.
+
+BuildKit refreshes the timestamps of layers it reuses once a day, so the bucket's 10-day expiry removes only layers that no build has used recently. A cache upload failure does not fail the build.
+
+Other repositories in the org can use the action only while this repository's **Settings → Actions → General → Access** allows repositories in the example-org organization.
 
 ## Setup
 

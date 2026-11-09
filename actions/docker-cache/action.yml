@@ -1,0 +1,51 @@
+# Gives a Docker build the cache-from and cache-to values for its BuildKit
+# layer cache, so a workflow can cache image layers without knowing where the
+# runner keeps them.
+#
+# On this stack's runners the cache lives in the stack's S3 bucket, under
+# buildkit/<owner>/<repo>/ with one entry per `name`. On any other runner both
+# outputs are empty, which docker/build-push-action and docker/bake-action
+# treat as "no cache", so the same workflow still builds on GitHub-hosted
+# runners.
+#
+# The build needs a docker-container builder, which docker/setup-buildx-action
+# creates; the default docker driver cannot export cache.
+name: Docker layer cache
+description: cache-from and cache-to values for a BuildKit image build on the example-org runners.
+
+inputs:
+  name:
+    description: >-
+      Cache entry name. Use a different name for each image built from the same
+      repository, or the images overwrite each other's cache. Letters, digits,
+      dots, dashes and underscores.
+    required: true
+  mode:
+    description: >-
+      `max` caches the layers of every build stage, so an unchanged stage is
+      skipped. `min` caches only the final image's layers, which uploads less
+      when an intermediate stage is large and cheap to rebuild.
+    required: false
+    default: max
+
+outputs:
+  cache-from:
+    description: Value for the build's cache-from. Empty on runners without a layer cache.
+    value: ${{ steps.spec.outputs.cache-from }}
+  cache-to:
+    description: >-
+      Value for the build's cache-to. Empty on runners without a layer cache.
+      A build that must not replace the cache, such as one for a pull request,
+      leaves cache-to unset.
+    value: ${{ steps.spec.outputs.cache-to }}
+
+runs:
+  using: composite
+  steps:
+    - id: spec
+      shell: bash
+      # Inputs go through env so a value is never spliced into the script text.
+      env:
+        CACHE_NAME: ${{ inputs.name }}
+        CACHE_MODE: ${{ inputs.mode }}
+      run: '"$GITHUB_ACTION_PATH/cache-spec.sh"'

@@ -14,6 +14,22 @@ jobs:
     steps:
       - uses: actions/checkout@v7.0.1
 
+      # Runs the docker-cache action from this checkout on one of the stack's
+      # runners, where the job-started hook has set the cache variables, so a
+      # change that breaks the action fails here before another repository
+      # pins it.
+      - id: docker-cache
+        uses: ./actions/docker-cache
+        with:
+          name: ci
+      - name: Check the docker-cache outputs
+        env:
+          CACHE_FROM: ${{ steps.docker-cache.outputs.cache-from }}
+          CACHE_TO: ${{ steps.docker-cache.outputs.cache-to }}
+        run: |
+          [[ "$CACHE_FROM" == "type=s3,"*",prefix=buildkit/$GITHUB_REPOSITORY/,name=ci" ]]
+          [[ "$CACHE_TO" == "$CACHE_FROM,mode=max,ignore-error=true" ]]
+
       # Installs vp and Node.js 24, the Lambda runtime's version. vp provides
       # bun at the version in package.json's packageManager field.
       - uses: voidzero-dev/setup-vp@v1.21.2
