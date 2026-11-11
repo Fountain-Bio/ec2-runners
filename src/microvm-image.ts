@@ -49,7 +49,8 @@ const JANITOR_PERIOD_MS = 5 * 60_000;
 // The base container ships openssl-snapsafe-libs, an OpenSSL build that stays
 // safe when many MicroVMs start from one memory snapshot, and it conflicts
 // with the stock openssl-libs, so the runner's dependency list leaves OpenSSL
-// out. oven-sh/setup-bun extracts Bun with unzip. gh comes from its release
+// out. oven-sh/setup-bun extracts Bun with unzip, and the Node.js builds that
+// actions/setup-node installs link against libatomic. gh comes from its release
 // tarball, checked like the runner's: Amazon Linux 2023's crypto policy
 // rejects the signatures on GitHub's gh packages.
 function dockerfile(runner: ReleaseDownload, ghCli: ReleaseDownload): string {
@@ -57,7 +58,7 @@ function dockerfile(runner: ReleaseDownload, ghCli: ReleaseDownload): string {
 
 RUN dnf install -y --setopt=install_weak_deps=0 \\
       tar gzip unzip git jq libicu krb5-libs zlib lttng-ust \\
-      shadow-utils sudo findutils which procps-ng python3 \\
+      shadow-utils sudo findutils which procps-ng python3 libatomic \\
     && dnf clean all
 
 RUN curl -fsSL -o /tmp/gh.tgz ${ghCli.url} \\
@@ -254,8 +255,15 @@ export async function ensureMicrovmImage(
   });
   if (image && ["CREATING", "UPDATING", "DELETING"].includes(image.state ?? "")) return { status: "building" };
 
+  // The image keeps naming its latest failed version after pruneVersions
+  // deletes that version, so a version Lambda no longer has counts as absent.
   const version = async (v: string | undefined) =>
-    v && image ? microvms.send(new GetMicrovmImageVersionCommand({ imageIdentifier: image.imageArn, imageVersion: v })) : undefined;
+    v && image
+      ? microvms.send(new GetMicrovmImageVersionCommand({ imageIdentifier: image.imageArn, imageVersion: v })).catch((err) => {
+          if (err instanceof ResourceNotFoundException) return undefined;
+          throw err;
+        })
+      : undefined;
   const active = await version(image?.latestActiveImageVersion);
   if (active?.description === description && now - (active.createdAt?.getTime() ?? 0) < REBUILD_AFTER_MS) {
     await pruneVersions(microvms, image!.imageArn!, active, settings.maxMinutes, now);

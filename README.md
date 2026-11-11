@@ -90,7 +90,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
 ```
 
-A MicroVM runner is an Amazon Linux 2023 container on ARM64 with the actions runner, `git`, `gh`, `jq`, `tar`, `unzip`, and Python 3. JavaScript actions run on the Node.js that the actions runner bundles. Each MicroVM has `MicrovmMemoryMiB` of memory (2 GiB by default) with 1 vCPU per 2 GiB, and Lambda lets it burst to 4 times that while the job needs it. It has no Docker, no AWS credentials, and no cache bucket, so jobs that build images, call AWS, or use `runs-on/cache` belong on `ec2` runners. A job cannot ask for both labels, and a `microvm` job cannot set EC2 labels such as `cpu=`; the webhook alerts on either.
+A MicroVM runner is an Amazon Linux 2023 container on ARM64 with the actions runner, `git`, `gh`, `jq`, `tar`, `unzip`, and Python 3. JavaScript actions run on the Node.js that the actions runner bundles, and a step that needs `node` or `npm` itself installs it with `actions/setup-node`. Each MicroVM has `MicrovmMemoryMiB` of memory (2 GiB by default) with 1 vCPU per 2 GiB, and Lambda lets it burst to 4 times that while the job needs it. It has no Docker, no AWS credentials, and no cache bucket, so jobs that build images, call AWS, or use `runs-on/cache` belong on `ec2` runners. A job cannot ask for both labels, and a `microvm` job cannot set EC2 labels such as `cpu=`; the webhook alerts on either.
 
 How it works:
 

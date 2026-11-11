@@ -485,8 +485,11 @@ function imageClient(image: Record<string, unknown> | undefined, versions: Recor
       case "GetMicrovmImageCommand":
         if (!image) throw new ResourceNotFoundException({ message: "no image", $metadata: {} });
         return image;
-      case "GetMicrovmImageVersionCommand":
-        return versions[cmd.input.imageVersion]!;
+      case "GetMicrovmImageVersionCommand": {
+        const v = versions[cmd.input.imageVersion];
+        if (!v) throw new ResourceNotFoundException({ message: "no version", $metadata: {} });
+        return v;
+      }
       case "ListMicrovmImageVersionsCommand":
         return { items: Object.values(versions) };
       default:
@@ -592,4 +595,13 @@ test("ensureMicrovmImage retries a failed build of the same inputs only after si
   const recent = await ensureMicrovmImage(failed(1).client, s3().client, settings);
   expect(recent).toEqual({ status: "build failed", failure: { version: "4.0", reason: "boom", newlyFailed: false } });
   expect((await ensureMicrovmImage(failed(7).client, s3().client, settings)).status).toBe("build started");
+});
+
+test("ensureMicrovmImage builds when the image's latest failed version has been deleted", async () => {
+  const lambda = imageClient(
+    { imageArn: ARN, state: "UPDATED", latestActiveImageVersion: "2.0", latestFailedImageVersion: "1.0" },
+    { "2.0": { imageVersion: "2.0", description: "runner 2.338.2, gh 2.103.3, source old", state: "SUCCESSFUL", createdAt: hoursAgo(5) } },
+  );
+  expect((await ensureMicrovmImage(lambda.client, s3().client, settings)).status).toBe("build started");
+  expect(lambda.names()).toContain("UpdateMicrovmImageCommand");
 });
