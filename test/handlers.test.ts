@@ -150,6 +150,8 @@ Object.assign(DynamoDBDocumentClient.prototype, {
 });
 
 // ---- GitHub stub: Octokit sends every request through globalThis.fetch ----
+// The janitor's Node.js release lookup also fetches, from nodejs.org, and its
+// routes sit beside GitHub's (keyed by path). A string body is sent as is.
 type Route = { status?: number; body?: unknown; headers?: Record<string, string> };
 let ghCalls: { key: string; search: string; body: any }[] = [];
 // A list of routes answers with each in turn, then keeps answering with the last.
@@ -189,7 +191,7 @@ Object.assign(globalThis, {
       responseBody = { ...responseBody, runners: [...responseBody.runners, ...registered] };
     }
     const res = route
-      ? new Response(status === 204 ? null : JSON.stringify(responseBody), {
+      ? new Response(status === 204 ? null : typeof responseBody === "string" ? responseBody : JSON.stringify(responseBody), {
           status,
           headers: { "content-type": "application/json", ...route.headers },
         })
@@ -227,6 +229,8 @@ const baseRoutes = (): Record<string, Route> => ({
       ],
     },
   },
+  "GET /dist/index.json": { body: [{ version: "v26.13.1", lts: "Lithium" }] },
+  "GET /dist/v26.13.1/SHASUMS256.txt": { body: `${RUNNER_SHA256}  node-v26.13.1-linux-arm64.tar.gz\n` },
   "GET /orgs/example-org/actions/runners": { body: { total_count: 0, runners: [] } },
   "GET /orgs/example-org/actions/runner-groups/1": { body: { id: 1, name: "Default", allows_public_repositories: false } },
   "POST /orgs/example-org/actions/runners/generate-jitconfig": {

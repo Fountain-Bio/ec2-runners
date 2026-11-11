@@ -1,4 +1,4 @@
-import { expect, test } from "vite-plus/test";
+import { afterEach, expect, test, vi } from "vite-plus/test";
 import { createHmac } from "node:crypto";
 import { ResourceNotFoundException } from "@aws-sdk/client-lambda-microvms";
 import { execFileSync } from "node:child_process";
@@ -8,6 +8,7 @@ import { join } from "node:path";
 import { JobConfigError, hasTriggerLabel, instanceRequirements, isStackJob, jobKind, parseLabels, type LaunchSpec } from "../src/labels.ts";
 import { ensureMicrovmImage, imageSource, zipFiles, type ImageSettings } from "../src/microvm-image.ts";
 import { microvmIdOf, runHookPayload } from "../src/microvm.ts";
+import { nodeDownload } from "../src/node-release.ts";
 import { alertMessage } from "../src/alerts.ts";
 import { verifySignature } from "../src/github.ts";
 import { availableRunners, canRun, classifyRunners, matchJobs, parseRunnerName, retirableRunners, runnerName } from "../src/pool.ts";
@@ -451,9 +452,15 @@ const RUNNER = {
   url: "https://github.com/actions/runner/releases/download/v2.338.2/actions-runner-linux-arm64-2.338.2.tar.gz",
   sha256: "a".repeat(64),
 };
+const NODE = {
+  version: "26.13.1",
+  url: "https://nodejs.org/dist/v26.13.1/node-v26.13.1-linux-arm64.tar.gz",
+  sha256: "d".repeat(64),
+};
+const RELEASES = { runner: RUNNER, ghCli: GH_CLI, node: NODE };
 
 test("zipFiles writes an archive that a standard zip reader extracts", () => {
-  const { files } = imageSource(RUNNER, GH_CLI, 2048);
+  const { files } = imageSource(RELEASES, 2048);
   const dir = mkdtempSync(join(tmpdir(), "zip-"));
   const path = join(dir, "source.zip");
   writeFileSync(path, zipFiles(files));
@@ -465,15 +472,19 @@ test("zipFiles writes an archive that a standard zip reader extracts", () => {
   expect(JSON.parse(read.toString())).toEqual(files);
   expect(files.Dockerfile).toContain(`echo "${RUNNER.sha256}  /tmp/runner.tgz" | sha256sum -c -`);
   expect(files.Dockerfile).toContain(`echo "${GH_CLI.sha256}  /tmp/gh.tgz" | sha256sum -c -`);
+  expect(files.Dockerfile).toContain(`echo "${NODE.sha256}  /tmp/node.tgz" | sha256sum -c -`);
+  expect(files.Dockerfile).toContain("touch /home/runner/work/_tool/node/26.13.1/arm64.complete");
 });
 
-test("imageSource fingerprints change with the runner release and the memory size", () => {
-  const base = imageSource(RUNNER, GH_CLI, 2048).fingerprint;
-  expect(imageSource(RUNNER, GH_CLI, 2048).fingerprint).toBe(base);
+test("imageSource fingerprints change with the runner, gh, and Node.js releases and the memory size", () => {
+  const base = imageSource(RELEASES, 2048).fingerprint;
+  expect(imageSource(RELEASES, 2048).fingerprint).toBe(base);
   const next = { version: "2.339.0", url: RUNNER.url.replaceAll("2.338.2", "2.339.0"), sha256: "b".repeat(64) };
-  expect(imageSource(next, GH_CLI, 2048).fingerprint).not.toBe(base);
-  expect(imageSource(RUNNER, GH_CLI, 1024).fingerprint).not.toBe(base);
-  expect(imageSource(RUNNER, { ...GH_CLI, url: GH_CLI.url.replaceAll("2.103.3", "2.104.0") }, 2048).fingerprint).not.toBe(base);
+  expect(imageSource({ ...RELEASES, runner: next }, 2048).fingerprint).not.toBe(base);
+  expect(imageSource(RELEASES, 1024).fingerprint).not.toBe(base);
+  const nextNode = { version: "26.13.2", url: NODE.url.replaceAll("26.13.1", "26.13.2"), sha256: "e".repeat(64) };
+  expect(imageSource({ ...RELEASES, node: nextNode }, 2048).fingerprint).not.toBe(base);
+  expect(imageSource({ ...RELEASES, ghCli: { ...GH_CLI, url: GH_CLI.url.replaceAll("2.103.3", "2.104.0") } }, 2048).fingerprint).not.toBe(base);
 });
 
 // A fake Lambda MicroVMs client holding one image and its versions.
@@ -509,19 +520,18 @@ const settings: ImageSettings = {
   memoryMiB: 2048,
   buildRoleArn: "arn:aws:iam::1:role/build",
   sourceBucket: "source",
-  runner: RUNNER,
-  ghCli: GH_CLI,
+  releases: RELEASES,
   maxMinutes: 360,
 };
 const ARN = "arn:aws:lambda:us-west-2:1:microvm-image:ec2-runners-runner";
-const currentDescription = `runner 2.338.2, gh 2.103.3, source ${imageSource(RUNNER, GH_CLI, 2048).fingerprint}`;
+const currentDescription = `runner 2.338.2, gh 2.103.3, node 26.13.1, source ${imageSource(RELEASES, 2048).fingerprint}`;
 const hoursAgo = (h: number) => new Date(Date.now() - h * 3600_000);
 
 test("ensureMicrovmImage creates the image when it is missing", async () => {
   const lambda = imageClient(undefined);
   const bucket = s3();
   expect((await ensureMicrovmImage(lambda.client, bucket.client, settings)).status).toBe("build started");
-  expect(bucket.puts[0]).toMatchObject({ Bucket: "source", Key: `ec2-runners-runner/${imageSource(RUNNER, GH_CLI, 2048).fingerprint}.zip` });
+  expect(bucket.puts[0]).toMatchObject({ Bucket: "source", Key: `ec2-runners-runner/${imageSource(RELEASES, 2048).fingerprint}.zip` });
   const create = lambda.calls.find((c) => c.name === "CreateMicrovmImageCommand")!.input;
   expect(create).toMatchObject({
     name: "ec2-runners-runner",
@@ -604,4 +614,33 @@ test("ensureMicrovmImage builds when the image's latest failed version has been 
   );
   expect((await ensureMicrovmImage(lambda.client, s3().client, settings)).status).toBe("build started");
   expect(lambda.names()).toContain("UpdateMicrovmImageCommand");
+});
+
+// nodejs.org's release index and checksums, answered by a stubbed fetch.
+function stubNodejsOrg(shasums: string) {
+  const index = [
+    { version: "v27.0.0", lts: false },
+    { version: "v26.13.1", lts: "Lithium" },
+    { version: "v24.22.3", lts: "Krypton" },
+  ];
+  vi.stubGlobal("fetch", async (url: string) => {
+    if (url === "https://nodejs.org/dist/index.json") return new Response(JSON.stringify(index));
+    if (url === "https://nodejs.org/dist/v26.13.1/SHASUMS256.txt") return new Response(shasums);
+    return new Response("not found", { status: 404 });
+  });
+}
+afterEach(() => vi.unstubAllGlobals());
+
+test("nodeDownload picks the newest LTS release and its ARM64 checksum", async () => {
+  stubNodejsOrg(`${"1".repeat(64)}  node-v26.13.1-linux-x64.tar.gz\n${"2".repeat(64)}  node-v26.13.1-linux-arm64.tar.gz\n`);
+  expect(await nodeDownload()).toEqual({
+    version: "26.13.1",
+    url: "https://nodejs.org/dist/v26.13.1/node-v26.13.1-linux-arm64.tar.gz",
+    sha256: "2".repeat(64),
+  });
+});
+
+test("nodeDownload fails when the release has no ARM64 checksum", async () => {
+  stubNodejsOrg(`${"1".repeat(64)}  node-v26.13.1-linux-x64.tar.gz\n`);
+  await expect(nodeDownload()).rejects.toThrow("no checksum for node-v26.13.1-linux-arm64.tar.gz");
 });

@@ -6,8 +6,8 @@
 // is a new image version, and RunMicrovm starts the latest active one.
 //
 // The janitor keeps the image current (ensureMicrovmImage). It builds the
-// image when it is missing, and rebuilds it when the actions/runner or gh
-// release, the image source, or the memory size changes, and when the active version is
+// image when it is missing, and rebuilds it when the actions/runner, gh, or
+// Node.js LTS release, the image source, or the memory size changes, and when the active version is
 // 30 days old, which picks up new Lambda base image versions before Lambda
 // expires the old ones. A build takes about three minutes. Until the first
 // build finishes, MicroVM launches fail and the reconciler launches EC2
@@ -53,7 +53,7 @@ const JANITOR_PERIOD_MS = 5 * 60_000;
 // actions/setup-node installs link against libatomic. gh comes from its release
 // tarball, checked like the runner's: Amazon Linux 2023's crypto policy
 // rejects the signatures on GitHub's gh packages.
-function dockerfile(runner: ReleaseDownload, ghCli: ReleaseDownload): string {
+function dockerfile(runner: ReleaseDownload, ghCli: ReleaseDownload, node: ReleaseDownload): string {
   return `FROM public.ecr.aws/lambda/microvms:al2023-minimal
 
 RUN dnf install -y --setopt=install_weak_deps=0 \\
@@ -77,6 +77,17 @@ RUN useradd --create-home --home-dir /home/runner runner \\
     && rm /tmp/runner.tgz \\
     && chown -R runner:runner /home/runner
 
+# Node.js in the runner's tool cache (see node-release.ts), laid out the way
+# actions/setup-node looks for it: node/<version>/arm64 under the tool cache,
+# which is _tool in the runner's work directory, beside an arm64.complete marker.
+RUN mkdir -p /home/runner/work/_tool/node/${node.version}/arm64 \\
+    && curl -fsSL -o /tmp/node.tgz ${node.url} \\
+    && echo "${node.sha256}  /tmp/node.tgz" | sha256sum -c - \\
+    && tar -xzf /tmp/node.tgz -C /home/runner/work/_tool/node/${node.version}/arm64 --strip-components=1 \\
+    && touch /home/runner/work/_tool/node/${node.version}/arm64.complete \\
+    && rm /tmp/node.tgz \\
+    && chown -R runner:runner /home/runner/work
+
 COPY hooks.py /opt/microvm-runner/hooks.py
 CMD ["python3", "-u", "/opt/microvm-runner/hooks.py"]
 `;
@@ -84,8 +95,13 @@ CMD ["python3", "-u", "/opt/microvm-runner/hooks.py"]
 
 // The container's main process: a server for Lambda's lifecycle hooks, which
 // Lambda POSTs to /aws/lambda-microvms/runtime/v1/<hook> on HOOK_PORT.
-//   ready, validate  Image build. Runs the runner binary once, so the snapshot
-//                    holds it in the page cache and runners start faster.
+//   ready, validate  Image build. Runs the runner binary, the Node.js builds
+//                    the runner runs JavaScript actions on, git, and the cached
+//                    Node.js and npm the way actions/setup-node does, once each,
+//                    so the snapshot holds their files in the page cache. A
+//                    MicroVM reads files outside the page cache from its
+//                    snapshot disk on first use: starting actions/checkout took
+//                    5 seconds, and setup-node's version checks 5 more.
 //   run              Each MicroVM. The body is {"microvmId", "runHookPayload"},
 //                    and the payload is the gzipped JIT config (see
 //                    runHookPayload in microvm.ts). Starts the runner in the
@@ -93,6 +109,7 @@ CMD ["python3", "-u", "/opt/microvm-runner/hooks.py"]
 // When the runner exits after its job, the server exits, and Lambda
 // terminates the MicroVM. Each log line starts with a Unix timestamp.
 const HOOKS_PY = `import base64
+import glob
 import gzip
 import json
 import os
@@ -115,6 +132,13 @@ def warm():
         capture_output=True, text=True, timeout=120,
     )
     log("warmed runner", rc=out.returncode, version=out.stdout.strip())
+    commands = [[node, "-e", "0"] for node in glob.glob(f"{RUNNER_DIR}/externals/node*/bin/node")]
+    commands.append(["git", "--version"])
+    for bin_dir in glob.glob("/home/runner/work/_tool/node/*/arm64/bin"):
+        commands += [["env", f"PATH={bin_dir}:/usr/bin:/bin", tool, "--version"] for tool in ("node", "npm")]
+    for command in commands:
+        out = subprocess.run(["sudo", "-u", "runner", *command], capture_output=True, text=True, timeout=120)
+        log("warmed", command=" ".join(command), rc=out.returncode)
 
 
 def run_job(microvm_id, payload):
@@ -153,14 +177,10 @@ if __name__ == "__main__":
     ThreadingHTTPServer(("0.0.0.0", ${HOOK_PORT}), Hooks).serve_forever()
 `;
 
-// The image's source files for a runner and gh release, and a fingerprint of
-// them together with the memory size, which names the build inputs.
-export function imageSource(
-  runner: ReleaseDownload,
-  ghCli: ReleaseDownload,
-  memoryMiB: number,
-): { files: Record<string, string>; fingerprint: string } {
-  const files = { Dockerfile: dockerfile(runner, ghCli), "hooks.py": HOOKS_PY };
+// The image's source files for a runner, gh, and Node.js release, and a
+// fingerprint of them together with the memory size, which names the build inputs.
+export function imageSource(releases: ImageReleases, memoryMiB: number): { files: Record<string, string>; fingerprint: string } {
+  const files = { Dockerfile: dockerfile(releases.runner, releases.ghCli, releases.node), "hooks.py": HOOKS_PY };
   const hash = createHash("sha256").update(JSON.stringify({ files, memoryMiB }));
   return { files, fingerprint: hash.digest("hex").slice(0, 16) };
 }
@@ -212,6 +232,14 @@ export function zipFiles(files: Record<string, string>): Buffer {
   return Buffer.concat([...locals, directory, end]);
 }
 
+// The releases the image holds: the actions runner, the gh CLI, and the
+// Node.js release in the tool cache.
+export interface ImageReleases {
+  runner: ReleaseDownload;
+  ghCli: ReleaseDownload;
+  node: ReleaseDownload;
+}
+
 export interface ImageSettings {
   // CreateMicrovmImage takes the name, and the other image calls take the ARN.
   imageName: string;
@@ -220,9 +248,7 @@ export interface ImageSettings {
   memoryMiB: number;
   buildRoleArn: string;
   sourceBucket: string;
-  // The runner and gh CLI releases the image should hold.
-  runner: ReleaseDownload;
-  ghCli: ReleaseDownload;
+  releases: ImageReleases;
   // Image versions are deleted once no MicroVM can still be running on them,
   // which is the runners' maximum lifetime after a newer version took over.
   maxMinutes: number;
@@ -231,11 +257,11 @@ export interface ImageSettings {
 
 export type ImageStatus = "current" | "building" | "build started" | "build failed";
 
-// The description each version is built with. It names the runner and gh
-// releases and the fingerprint of the build inputs, so the janitor can tell
-// whether the active version matches what it would build now.
-const describeBuild = (runner: ReleaseDownload, ghCli: ReleaseDownload, fingerprint: string) =>
-  `runner ${runner.version}, gh ${ghCli.version}, source ${fingerprint}`;
+// The description each version is built with. It names the runner, gh, and
+// Node.js releases and the fingerprint of the build inputs, so the janitor can
+// tell whether the active version matches what it would build now.
+const describeBuild = ({ runner, ghCli, node }: ImageReleases, fingerprint: string) =>
+  `runner ${runner.version}, gh ${ghCli.version}, node ${node.version}, source ${fingerprint}`;
 
 // Builds or rebuilds the image when needed (see the top of this file), and
 // deletes versions no MicroVM can still use. Returns what it found or did, and
@@ -246,8 +272,8 @@ export async function ensureMicrovmImage(
   settings: ImageSettings,
 ): Promise<{ status: ImageStatus; failure?: { version: string; reason: string; newlyFailed: boolean } }> {
   const now = settings.now ?? Date.now();
-  const { files, fingerprint } = imageSource(settings.runner, settings.ghCli, settings.memoryMiB);
-  const description = describeBuild(settings.runner, settings.ghCli, fingerprint);
+  const { files, fingerprint } = imageSource(settings.releases, settings.memoryMiB);
+  const description = describeBuild(settings.releases, fingerprint);
 
   const image = await microvms.send(new GetMicrovmImageCommand({ imageIdentifier: settings.imageArn })).catch((err) => {
     if (err instanceof ResourceNotFoundException) return undefined;

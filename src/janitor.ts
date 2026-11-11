@@ -15,6 +15,7 @@ import { jobStore } from "./jobs.ts";
 import { errorMessage, log } from "./log.ts";
 import { describeMicrovmRunners, isMicrovmId, terminateMicrovms } from "./microvm.ts";
 import { ensureMicrovmImage, type ImageStatus } from "./microvm-image.ts";
+import { nodeDownload } from "./node-release.ts";
 import { LAUNCH_GRACE_MS, classifyRunners, parseRunnerName } from "./pool.ts";
 
 // The boot script powers an instance off at MaxMinutes. The janitor waits this
@@ -122,8 +123,11 @@ async function keepMicrovmImageCurrent(config: JanitorConfig, gh: GitHubClient):
       memoryMiB: config.MICROVM_MEMORY_MIB,
       buildRoleArn: config.MICROVM_BUILD_ROLE_ARN,
       sourceBucket: config.MICROVM_SOURCE_BUCKET,
-      runner: await gh.runnerDownload(config.RUNNER_VERSION, "arm64"),
-      ghCli: await gh.ghCliDownload(),
+      releases: {
+        runner: await gh.runnerDownload(config.RUNNER_VERSION, "arm64"),
+        ghCli: await gh.ghCliDownload(),
+        node: await nodeDownload(),
+      },
       maxMinutes: config.MAX_MINUTES,
     });
     if (result.failure?.newlyFailed) {
@@ -132,7 +136,7 @@ async function keepMicrovmImageCurrent(config: JanitorConfig, gh: GitHubClient):
         "MicroVM image build failed",
         `Version ${result.failure.version} of MicroVM image ${config.MICROVM_IMAGE_NAME} failed to build: ${result.failure.reason}\n\n` +
           `Jobs labelled for MicroVMs run on EC2 runners until a build succeeds. The build log is in /aws/lambda-microvms/${config.MICROVM_IMAGE_NAME}. ` +
-          `The janitor retries the build in 6 hours, or sooner when the runner release or the image source changes.`,
+          `The janitor retries the build in 6 hours, or sooner when the runner, gh, or Node.js release or the image source changes.`,
       );
     }
     return result.status;
