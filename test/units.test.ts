@@ -1,10 +1,13 @@
 import { expect, test } from "vite-plus/test";
 import { createHmac } from "node:crypto";
+import { ResourceNotFoundException } from "@aws-sdk/client-lambda-microvms";
 import { execFileSync } from "node:child_process";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { JobConfigError, hasTriggerLabel, instanceRequirements, parseLabels, type LaunchSpec } from "../src/labels.ts";
+import { JobConfigError, hasTriggerLabel, instanceRequirements, isStackJob, jobKind, parseLabels, type LaunchSpec } from "../src/labels.ts";
+import { ensureMicrovmImage, imageSource, zipFiles, type ImageSettings } from "../src/microvm-image.ts";
+import { microvmIdOf, runHookPayload } from "../src/microvm.ts";
 import { alertMessage } from "../src/alerts.ts";
 import { verifySignature } from "../src/github.ts";
 import { availableRunners, canRun, classifyRunners, matchJobs, parseRunnerName, retirableRunners, runnerName } from "../src/pool.ts";
@@ -403,4 +406,190 @@ test("retirableRunners keeps runners a queued job may still need", () => {
   const spare = [runner(1, "live"), runner(2, "live"), runner(3, "launching", undefined)];
   // Job 2 still waits, so its runner stays; job 3's runner is still launching.
   expect(retirableRunners(spare, new Set([2]), "ec2-runners").map((r) => r.id)).toEqual([1]);
+});
+
+// ---- MicroVM runners ----
+
+const kinds = { ec2Label: "ec2", microvmLabel: "microvm" };
+
+test("jobKind tells EC2 jobs from MicroVM jobs and rejects labels no runner can satisfy", () => {
+  expect(jobKind(["ec2", "cpu=4"], kinds)).toBe("ec2");
+  expect(jobKind(["MicroVM"], kinds)).toBe("microvm");
+  expect(jobKind(["microvm/run=42"], kinds)).toBe("microvm");
+  expect(() => jobKind(["ec2", "microvm"], kinds)).toThrow(/not both/);
+  expect(() => jobKind(["microvm", "ram=8"], kinds)).toThrow(JobConfigError);
+  expect(() => jobKind(["ec2", "cpu=lots"], kinds)).toThrow(JobConfigError);
+  expect(isStackJob(["microvm"], kinds) && isStackJob(["ec2"], kinds) && !isStackJob(["ubuntu-latest"], kinds)).toBe(true);
+});
+
+test("microvmIdOf reads the MicroVM ID label", () => {
+  expect(microvmIdOf({ labels: [{ name: "microvm" }, { name: "microvm-id=microvm-abc" }] })).toBe("microvm-abc");
+  expect(microvmIdOf({ labels: [{ name: "ec2" }] })).toBeUndefined();
+});
+
+test("runHookPayload fits an encoded JIT config under RunMicrovm's 4,096-character limit", () => {
+  // Sized like a real one: a JIT config's .runner settings, credentials, and
+  // 2048-bit RSA key come to about 4,140 characters encoded.
+  const encoded = Buffer.from(
+    JSON.stringify({ ".runner": "r".repeat(568), ".credentials": randomBase64(225), ".credentials_rsaparams": randomBase64(1632) }),
+  ).toString("base64");
+  expect(encoded.length).toBeGreaterThan(4096);
+  expect(runHookPayload(encoded).length).toBeLessThan(4096);
+});
+
+function randomBase64(bytes: number): string {
+  return Buffer.from(Array.from({ length: bytes }, () => Math.floor(Math.random() * 256))).toString("base64");
+}
+
+const GH_CLI = {
+  version: "2.103.3",
+  url: "https://github.com/cli/cli/releases/download/v2.103.3/gh_2.103.3_linux_arm64.tar.gz",
+  sha256: "c".repeat(64),
+};
+const RUNNER = {
+  version: "2.338.2",
+  url: "https://github.com/actions/runner/releases/download/v2.338.2/actions-runner-linux-arm64-2.338.2.tar.gz",
+  sha256: "a".repeat(64),
+};
+
+test("zipFiles writes an archive that a standard zip reader extracts", () => {
+  const { files } = imageSource(RUNNER, GH_CLI, 2048);
+  const dir = mkdtempSync(join(tmpdir(), "zip-"));
+  const path = join(dir, "source.zip");
+  writeFileSync(path, zipFiles(files));
+  const read = execFileSync("python3", [
+    "-c",
+    "import json, sys, zipfile; z = zipfile.ZipFile(sys.argv[1]); z.testzip(); print(json.dumps({n: z.read(n).decode() for n in z.namelist()}))",
+    path,
+  ]);
+  expect(JSON.parse(read.toString())).toEqual(files);
+  expect(files.Dockerfile).toContain(`echo "${RUNNER.sha256}  /tmp/runner.tgz" | sha256sum -c -`);
+  expect(files.Dockerfile).toContain(`echo "${GH_CLI.sha256}  /tmp/gh.tgz" | sha256sum -c -`);
+});
+
+test("imageSource fingerprints change with the runner release and the memory size", () => {
+  const base = imageSource(RUNNER, GH_CLI, 2048).fingerprint;
+  expect(imageSource(RUNNER, GH_CLI, 2048).fingerprint).toBe(base);
+  const next = { version: "2.339.0", url: RUNNER.url.replaceAll("2.338.2", "2.339.0"), sha256: "b".repeat(64) };
+  expect(imageSource(next, GH_CLI, 2048).fingerprint).not.toBe(base);
+  expect(imageSource(RUNNER, GH_CLI, 1024).fingerprint).not.toBe(base);
+  expect(imageSource(RUNNER, { ...GH_CLI, url: GH_CLI.url.replaceAll("2.103.3", "2.104.0") }, 2048).fingerprint).not.toBe(base);
+});
+
+// A fake Lambda MicroVMs client holding one image and its versions.
+function imageClient(image: Record<string, unknown> | undefined, versions: Record<string, Record<string, unknown>> = {}) {
+  const calls: { name: string; input: any }[] = [];
+  const send = async (cmd: { constructor: { name: string }; input: any }) => {
+    calls.push({ name: cmd.constructor.name, input: cmd.input });
+    switch (cmd.constructor.name) {
+      case "GetMicrovmImageCommand":
+        if (!image) throw new ResourceNotFoundException({ message: "no image", $metadata: {} });
+        return image;
+      case "GetMicrovmImageVersionCommand":
+        return versions[cmd.input.imageVersion]!;
+      case "ListMicrovmImageVersionsCommand":
+        return { items: Object.values(versions) };
+      default:
+        return {};
+    }
+  };
+  return { client: { send } as any, calls, names: () => calls.map((c) => c.name) };
+}
+const s3 = () => {
+  const puts: any[] = [];
+  return { client: { send: async (cmd: { input: unknown }) => (puts.push(cmd.input), {}) } as any, puts };
+};
+const settings: ImageSettings = {
+  imageName: "ec2-runners-runner",
+  imageArn: "arn:aws:lambda:us-west-2:1:microvm-image:ec2-runners-runner",
+  region: "us-west-2",
+  memoryMiB: 2048,
+  buildRoleArn: "arn:aws:iam::1:role/build",
+  sourceBucket: "source",
+  runner: RUNNER,
+  ghCli: GH_CLI,
+  maxMinutes: 360,
+};
+const ARN = "arn:aws:lambda:us-west-2:1:microvm-image:ec2-runners-runner";
+const currentDescription = `runner 2.338.2, gh 2.103.3, source ${imageSource(RUNNER, GH_CLI, 2048).fingerprint}`;
+const hoursAgo = (h: number) => new Date(Date.now() - h * 3600_000);
+
+test("ensureMicrovmImage creates the image when it is missing", async () => {
+  const lambda = imageClient(undefined);
+  const bucket = s3();
+  expect((await ensureMicrovmImage(lambda.client, bucket.client, settings)).status).toBe("build started");
+  expect(bucket.puts[0]).toMatchObject({ Bucket: "source", Key: `ec2-runners-runner/${imageSource(RUNNER, GH_CLI, 2048).fingerprint}.zip` });
+  const create = lambda.calls.find((c) => c.name === "CreateMicrovmImageCommand")!.input;
+  expect(create).toMatchObject({
+    name: "ec2-runners-runner",
+    baseImageArn: "arn:aws:lambda:us-west-2:aws:microvm-image:al2023-1",
+    description: currentDescription,
+    cpuConfigurations: [{ architecture: "ARM_64" }],
+    resources: [{ minimumMemoryInMiB: 2048 }],
+    hooks: { port: 9000, microvmHooks: { run: "ENABLED" } },
+  });
+});
+
+test("ensureMicrovmImage leaves a current image alone and deletes versions no MicroVM can use", async () => {
+  const lambda = imageClient(
+    { imageArn: ARN, state: "UPDATED", latestActiveImageVersion: "3.0" },
+    {
+      "3.0": { imageVersion: "3.0", description: currentDescription, state: "SUCCESSFUL", createdAt: hoursAgo(10), updatedAt: hoursAgo(9) },
+      "2.0": { imageVersion: "2.0", description: "older", state: "SUCCESSFUL" },
+      "1.0": { imageVersion: "1.0", description: "broken", state: "FAILED" },
+    },
+  );
+  expect((await ensureMicrovmImage(lambda.client, s3().client, settings)).status).toBe("current");
+  expect(
+    lambda.calls
+      .filter((c) => c.name === "DeleteMicrovmImageVersionCommand")
+      .map((c): string => c.input.imageVersion)
+      .sort((x, y) => x.localeCompare(y)),
+  ).toEqual(["1.0", "2.0"]);
+  expect(lambda.names()).not.toContain("UpdateMicrovmImageCommand");
+});
+
+test("ensureMicrovmImage keeps the previous version while MicroVMs may still run on it", async () => {
+  const lambda = imageClient(
+    { imageArn: ARN, state: "UPDATED", latestActiveImageVersion: "3.0" },
+    {
+      "3.0": { imageVersion: "3.0", description: currentDescription, state: "SUCCESSFUL", createdAt: hoursAgo(1), updatedAt: hoursAgo(1) },
+      "2.0": { imageVersion: "2.0", description: "older", state: "SUCCESSFUL" },
+    },
+  );
+  await ensureMicrovmImage(lambda.client, s3().client, settings);
+  expect(lambda.names()).not.toContain("DeleteMicrovmImageVersionCommand");
+});
+
+test("ensureMicrovmImage rebuilds for a new runner release or a month-old version, and waits out a running build", async () => {
+  const stale = imageClient(
+    { imageArn: ARN, state: "UPDATED", latestActiveImageVersion: "3.0" },
+    { "3.0": { imageVersion: "3.0", description: "runner 2.337.0, gh 2.103.3, source 0", state: "SUCCESSFUL", createdAt: hoursAgo(5) } },
+  );
+  expect((await ensureMicrovmImage(stale.client, s3().client, settings)).status).toBe("build started");
+  expect(stale.calls.find((c) => c.name === "UpdateMicrovmImageCommand")!.input).toMatchObject({
+    imageIdentifier: ARN,
+    description: currentDescription,
+  });
+
+  const old = imageClient(
+    { imageArn: ARN, state: "UPDATED", latestActiveImageVersion: "3.0" },
+    { "3.0": { imageVersion: "3.0", description: currentDescription, state: "SUCCESSFUL", createdAt: hoursAgo(31 * 24) } },
+  );
+  expect((await ensureMicrovmImage(old.client, s3().client, settings)).status).toBe("build started");
+
+  const building = imageClient({ imageArn: ARN, state: "UPDATING", latestActiveImageVersion: "3.0" });
+  expect((await ensureMicrovmImage(building.client, s3().client, settings)).status).toBe("building");
+  expect(building.names()).toEqual(["GetMicrovmImageCommand"]);
+});
+
+test("ensureMicrovmImage retries a failed build of the same inputs only after six hours", async () => {
+  const failed = (hours: number) =>
+    imageClient(
+      { imageArn: ARN, state: "UPDATE_FAILED", latestFailedImageVersion: "4.0" },
+      { "4.0": { imageVersion: "4.0", description: currentDescription, state: "FAILED", stateReason: "boom", updatedAt: hoursAgo(hours) } },
+    );
+  const recent = await ensureMicrovmImage(failed(1).client, s3().client, settings);
+  expect(recent).toEqual({ status: "build failed", failure: { version: "4.0", reason: "boom", newlyFailed: false } });
+  expect((await ensureMicrovmImage(failed(7).client, s3().client, settings)).status).toBe("build started");
 });

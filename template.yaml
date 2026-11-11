@@ -1,9 +1,10 @@
 AWSTemplateFormatVersion: "2010-09-09"
 Description: >-
-  Ephemeral GitHub Actions runners on EC2 Spot. A GitHub App webhook records
-  queued jobs in a DynamoDB table, and a reconciler launches a fresh instance
-  for each job the idle runners cannot cover. Each instance runs one job and
-  terminates itself. Includes an S3 bucket for runs-on/cache.
+  Ephemeral GitHub Actions runners on EC2 Spot and AWS Lambda MicroVMs. A
+  GitHub App webhook records queued jobs in a DynamoDB table, and a reconciler
+  launches a fresh instance or MicroVM for each job the idle runners cannot
+  cover. Each runner runs one job and terminates itself. Includes an S3 bucket
+  for runs-on/cache.
 
 Parameters:
   GitHubOrg:
@@ -14,6 +15,21 @@ Parameters:
     Type: String
     Description: Jobs whose runs-on labels include this label get an EC2 runner.
     Default: ec2
+  MicrovmLabel:
+    Type: String
+    Description: >-
+      Jobs whose runs-on labels include this label get a Lambda MicroVM runner,
+      which starts in seconds. Meant for short jobs that need no Docker or AWS
+      access.
+    Default: microvm
+  MicrovmMemoryMiB:
+    Type: Number
+    Description: >-
+      Baseline memory of each MicroVM runner. Lambda gives 1 vCPU per 2048 MiB
+      and lets a MicroVM burst to 4 times its baseline. The account's MicroVM
+      memory quota divided by this is how many MicroVM runners run at once.
+    Default: 2048
+    AllowedValues: [512, 1024, 2048, 4096, 8192]
   RunnerGroupId:
     Type: Number
     Description: Organization runner group ID. The Default group has ID 1.
@@ -241,6 +257,88 @@ Resources:
           HttpPutResponseHopLimit: 2
           HttpEndpoint: enabled
 
+  # ---------- MicroVM runners ----------
+  # The janitor writes the MicroVM image's source zip (a Dockerfile and the
+  # runner's hook server, from src/microvm-image.ts) here, and Lambda reads it
+  # when it builds the image. Runners cannot write here, unlike the cache
+  # bucket, so no job can change what later MicroVM runners run.
+  MicrovmSourceBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault: { SSEAlgorithm: AES256 }
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      OwnershipControls:
+        Rules: [{ ObjectOwnership: BucketOwnerEnforced }]
+      LifecycleConfiguration:
+        Rules:
+          - Id: expire-old-sources
+            Status: Enabled
+            ExpirationInDays: 60
+
+  # Image build logs and each MicroVM runner's log (its hook server and the
+  # runner's output), one stream per build and per MicroVM. Lambda writes to
+  # /aws/lambda-microvms/<image name>.
+  MicrovmLogs:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/lambda-microvms/${AWS::StackName}-runner
+      RetentionInDays: 14
+
+  # Lambda assumes this role to build the image: it reads the source zip and
+  # writes the build log.
+  MicrovmBuildRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: lambda.amazonaws.com }
+            Action: [sts:AssumeRole, sts:TagSession]
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+      Policies:
+        - PolicyName: build
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: s3:GetObject
+                Resource: !Sub ${MicrovmSourceBucket.Arn}/*
+              - Effect: Allow
+                Action: [logs:CreateLogStream, logs:PutLogEvents]
+                Resource: !GetAtt MicrovmLogs.Arn
+
+  # The role each MicroVM runner runs with. It only writes the runner's log, so
+  # jobs on MicroVM runners have no AWS access.
+  MicrovmExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: lambda.amazonaws.com }
+            Action: [sts:AssumeRole, sts:TagSession]
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+      Policies:
+        - PolicyName: logs
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: [logs:CreateLogStream, logs:PutLogEvents]
+                Resource: !GetAtt MicrovmLogs.Arn
+
   # ---------- Control plane ----------
   GitHubAppSecret:
     Type: AWS::SecretsManager::Secret
@@ -345,6 +443,17 @@ Resources:
                 Condition:
                   StringEquals:
                     aws:ResourceTag/ec2-runners:stack: !Ref AWS::StackName
+              # Starts MicroVM runners from the stack's image, looks up idle
+              # ones, and terminates spare ones.
+              - Effect: Allow
+                Action: [lambda:RunMicrovm, lambda:GetMicrovm, lambda:TerminateMicrovm]
+                Resource: !Sub arn:${AWS::Partition}:lambda:${AWS::Region}:${AWS::AccountId}:microvm-image:${AWS::StackName}-runner
+              - Effect: Allow
+                Action: lambda:PassNetworkConnector
+                Resource: !Sub arn:${AWS::Partition}:lambda:${AWS::Region}:aws:network-connector:aws-network-connector:*
+              - Effect: Allow
+                Action: iam:PassRole
+                Resource: !GetAtt MicrovmExecutionRole.Arn
               # Alerts about jobs that cannot launch or keep failing to launch.
               - Effect: Allow
                 Action: sns:Publish
@@ -385,6 +494,35 @@ Resources:
                 Condition:
                   StringEquals:
                     aws:ResourceTag/ec2-runners:stack: !Ref AWS::StackName
+              # Terminates idle MicroVM runners, and builds, refreshes, and
+              # prunes the MicroVM image. CreateMicrovmImage has no resource
+              # type to scope it by, since the image does not exist yet.
+              - Effect: Allow
+                Action: lambda:CreateMicrovmImage
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - lambda:GetMicrovm
+                  - lambda:TerminateMicrovm
+                  - lambda:UpdateMicrovmImage
+                  - lambda:GetMicrovmImage
+                  - lambda:GetMicrovmImageVersion
+                  - lambda:ListMicrovmImageVersions
+                  - lambda:DeleteMicrovmImageVersion
+                Resource: !Sub arn:${AWS::Partition}:lambda:${AWS::Region}:${AWS::AccountId}:microvm-image:${AWS::StackName}-runner
+              - Effect: Allow
+                Action: lambda:PassNetworkConnector
+                Resource: !Sub arn:${AWS::Partition}:lambda:${AWS::Region}:aws:network-connector:aws-network-connector:*
+              - Effect: Allow
+                Action: iam:PassRole
+                Resource: !GetAtt MicrovmBuildRole.Arn
+              - Effect: Allow
+                Action: s3:PutObject
+                Resource: !Sub ${MicrovmSourceBucket.Arn}/*
+              # Alerts about a failed MicroVM image build.
+              - Effect: Allow
+                Action: sns:Publish
+                Resource: !Ref AlertTopic
 
   # Jobs that asked for an EC2 runner, keyed by GitHub job ID. The webhook
   # writes them and the reconciler reads the queued ones. Rows expire after a
@@ -406,7 +544,8 @@ Resources:
 
   # Receives alerts: job labels that can never launch, launches that keep
   # failing, jobs whose runners keep going unused, a runner group that admits
-  # public repositories, and the CloudWatch alarms below.
+  # public repositories, a failed MicroVM image build, and the CloudWatch
+  # alarms below.
   AlertTopic:
     Type: AWS::SNS::Topic
     Properties:
@@ -461,6 +600,7 @@ Resources:
           GITHUB_ORG: !Ref GitHubOrg
           RUNNER_PREFIX: !Ref AWS::StackName
           TRIGGER_LABEL: !Ref TriggerLabel
+          MICROVM_LABEL: !Ref MicrovmLabel
           RECONCILER_FUNCTION: !Ref ReconcilerFunction
           JOBS_TABLE: !Ref JobsTable
           ALERT_TOPIC_ARN: !Ref AlertTopic
@@ -525,6 +665,9 @@ Resources:
           RUNNER_VERSION: !Ref RunnerVersion
           BOOT_LOG_GROUP: !Ref BootLogs
           CPU_BASELINE_FAMILY: !Ref CpuBaselineFamily
+          MICROVM_LABEL: !Ref MicrovmLabel
+          MICROVM_IMAGE_ARN: !Sub arn:${AWS::Partition}:lambda:${AWS::Region}:${AWS::AccountId}:microvm-image:${AWS::StackName}-runner
+          MICROVM_EXECUTION_ROLE_ARN: !GetAtt MicrovmExecutionRole.Arn
 
   ReconcilerAsyncConfig:
     Type: AWS::Lambda::EventInvokeConfig
@@ -555,6 +698,13 @@ Resources:
           IDLE_MINUTES: !Ref IdleMinutes
           MAX_MINUTES: !Ref MaxMinutes
           LAUNCH_TEMPLATE_ID: !Ref RunnerLaunchTemplate
+          ALERT_TOPIC_ARN: !Ref AlertTopic
+          RUNNER_VERSION: !Ref RunnerVersion
+          MICROVM_IMAGE_NAME: !Sub ${AWS::StackName}-runner
+          MICROVM_IMAGE_ARN: !Sub arn:${AWS::Partition}:lambda:${AWS::Region}:${AWS::AccountId}:microvm-image:${AWS::StackName}-runner
+          MICROVM_MEMORY_MIB: !Ref MicrovmMemoryMiB
+          MICROVM_BUILD_ROLE_ARN: !GetAtt MicrovmBuildRole.Arn
+          MICROVM_SOURCE_BUCKET: !Ref MicrovmSourceBucket
 
   MaintenanceSchedule:
     Type: AWS::Events::Rule

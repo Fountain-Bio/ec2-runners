@@ -38,8 +38,8 @@ export function isGitHubError(err: unknown, status: number): boolean {
   return err instanceof RequestError && err.status === status;
 }
 
-// An actions/runner release tarball and its SHA-256 checksum.
-export interface RunnerDownload {
+// A release tarball (actions/runner, or the gh CLI) and its SHA-256 checksum.
+export interface ReleaseDownload {
   version: string;
   url: string;
   sha256: string;
@@ -214,6 +214,13 @@ export class GitHubClient {
     return runners.filter((r) => r.name.startsWith(namePrefix));
   }
 
+  // Adds custom labels to a registration, such as the microvm-id label that
+  // links a MicroVM runner to its MicroVM.
+  async addRunnerLabels(runnerId: number, labels: string[]): Promise<void> {
+    const gh = await this.octokit();
+    await gh.rest.actions.addCustomLabelsToSelfHostedRunnerForOrg({ org: this.org, runner_id: runnerId, labels });
+  }
+
   async deleteRunner(runnerId: number): Promise<void> {
     const gh = await this.octokit();
     await gh.rest.actions.deleteSelfHostedRunnerFromOrg({ org: this.org, runner_id: runnerId });
@@ -221,7 +228,7 @@ export class GitHubClient {
 
   // Looks up the actions/runner release tarball for a version ("latest" or
   // "2.338.0") and its checksum, which GitHub publishes as the asset digest.
-  async runnerDownload(version: string, arch: RunnerArch): Promise<RunnerDownload> {
+  async runnerDownload(version: string, arch: RunnerArch): Promise<ReleaseDownload> {
     const gh = await this.octokit();
     const repo = { owner: "actions", repo: "runner" };
     const { data: release } =
@@ -237,5 +244,19 @@ export class GitHubClient {
       );
     }
     return { version: resolved, url: asset.browser_download_url, sha256 };
+  }
+
+  // Looks up the latest gh CLI release tarball for Linux on ARM64 and its
+  // checksum, for the MicroVM image. The image installs gh from this tarball
+  // because Amazon Linux 2023 rejects the signatures on GitHub's gh packages.
+  async ghCliDownload(): Promise<ReleaseDownload> {
+    const gh = await this.octokit();
+    const { data: release } = await gh.rest.repos.getLatestRelease({ owner: "cli", repo: "cli" });
+    const version = release.tag_name.replace(/^v/, "");
+    const filename = `gh_${version}_linux_arm64.tar.gz`;
+    const asset = release.assets.find((a) => a.name === filename);
+    const sha256 = asset?.digest?.match(/^sha256:([0-9a-f]{64})$/)?.[1];
+    if (!asset || !sha256) throw new Error(`cli/cli ${release.tag_name} has no ${filename} with a sha256 digest`);
+    return { version, url: asset.browser_download_url, sha256 };
   }
 }

@@ -1,8 +1,9 @@
 // Parses GitHub Actions job labels into a launch spec.
 //
-// A job opts in by including the trigger label (default "ec2"). Settings are
-// key=value labels, given either as separate array entries or joined with "/"
-// in a single label:
+// A job opts in by including the trigger label (default "ec2"), or the MicroVM
+// label (default "microvm") for a Lambda MicroVM runner (see jobKind). An EC2
+// job's settings are key=value labels, given either as separate array entries
+// or joined with "/" in a single label:
 //
 //   runs-on: [ec2, cpu=4, image=ubuntu24-full-x64]
 //   runs-on: "ec2/cpu=4/image=ubuntu24-full-x64"
@@ -57,6 +58,46 @@ function labelParts(labels: readonly string[]): string[] {
 // Whether a job opted in. GitHub matches labels case-insensitively.
 export function hasTriggerLabel(labels: readonly string[], triggerLabel = "ec2"): boolean {
   return labelParts(labels).some((p) => p.toLowerCase() === triggerLabel.toLowerCase());
+}
+
+// The two kinds of runner the stack launches. An "ec2" job (trigger label,
+// default "ec2") gets an EC2 instance sized from its labels. A "microvm" job
+// (MicroVM label, default "microvm") gets a Lambda MicroVM of the image's
+// fixed size, or an EC2 instance of the default size when no MicroVM launches.
+export type RunnerKind = "ec2" | "microvm";
+
+export interface KindLabels {
+  ec2Label: string;
+  microvmLabel: string;
+}
+
+// Whether a job asked for one of the stack's runners.
+export function isStackJob(labels: readonly string[], { ec2Label, microvmLabel }: KindLabels): boolean {
+  return hasTriggerLabel(labels, ec2Label) || hasTriggerLabel(labels, microvmLabel);
+}
+
+// The settings that size or place an EC2 instance. A MicroVM's size is fixed
+// by the image, so a MicroVM job that sets one is a mistake worth reporting.
+const EC2_ONLY_KEYS = ["cpu", "ram", "disk", "family", "image", "spot", "nvme"];
+
+// Which kind of runner a stack job asked for. Throws JobConfigError for labels
+// that can never launch: both kinds at once (no runner has both labels), a
+// MicroVM job with EC2 settings, or an EC2 job whose settings parseLabels
+// rejects.
+export function jobKind(labels: readonly string[], { ec2Label, microvmLabel }: KindLabels): RunnerKind {
+  const microvm = hasTriggerLabel(labels, microvmLabel);
+  if (microvm && hasTriggerLabel(labels, ec2Label)) {
+    throw new JobConfigError(`A job can ask for ${ec2Label} or ${microvmLabel}, not both: no runner has both labels`);
+  }
+  if (!microvm) {
+    parseLabels(labels);
+    return "ec2";
+  }
+  const ec2Setting = labelParts(labels).find((p) => EC2_ONLY_KEYS.includes(p.split("=")[0]!.toLowerCase()) && p.includes("="));
+  if (ec2Setting) {
+    throw new JobConfigError(`Label ${ec2Setting} applies only to ${ec2Label} jobs. A ${microvmLabel} runner has the MicroVM image's fixed size.`);
+  }
+  return "microvm";
 }
 
 // Reads the settings from an opted-in job's labels. Callers check

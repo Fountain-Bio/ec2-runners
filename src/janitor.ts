@@ -1,13 +1,20 @@
-// Runs every 5 minutes. Terminates instances that outlived the max lifetime
-// or never picked up a job, removes stale runner registrations, and deletes
-// launch template versions that a stopped reconciler left behind.
+// Runs every 5 minutes. Terminates instances and MicroVMs that outlived the
+// max lifetime or never picked up a job, removes stale runner registrations,
+// deletes launch template versions that a stopped reconciler left behind, and
+// keeps the MicroVM image current.
 
 import { EC2Client } from "@aws-sdk/client-ec2";
+import { LambdaMicrovmsClient } from "@aws-sdk/client-lambda-microvms";
+import { S3Client } from "@aws-sdk/client-s3";
+import { alert } from "./alerts.ts";
 import { github } from "./app-secret.ts";
-import { janitorConfig } from "./config.ts";
+import { janitorConfig, type JanitorConfig } from "./config.ts";
 import { deleteStaleLaunchTemplateVersions, listRunnerInstances, terminateInstances } from "./ec2.ts";
+import type { GitHubClient } from "./github.ts";
 import { jobStore } from "./jobs.ts";
 import { errorMessage, log } from "./log.ts";
+import { describeMicrovmRunners, isMicrovmId, terminateMicrovms } from "./microvm.ts";
+import { ensureMicrovmImage, type ImageStatus } from "./microvm-image.ts";
 import { LAUNCH_GRACE_MS, classifyRunners, parseRunnerName } from "./pool.ts";
 
 // The boot script powers an instance off at MaxMinutes. The janitor waits this
@@ -18,15 +25,25 @@ const LIFETIME_GRACE_MS = 5 * 60_000;
 const STALE_VERSION_AGE_MS = 60 * 60_000;
 
 const ec2 = new EC2Client({});
+const microvms = new LambdaMicrovmsClient({});
+const s3 = new S3Client({});
 
-export async function janitor(): Promise<{ terminated: string[]; removedRunners: string[]; deletedVersions: string[] }> {
+export async function janitor(): Promise<{
+  terminated: string[];
+  removedRunners: string[];
+  deletedVersions: string[];
+  microvmImage: ImageStatus | "error";
+}> {
   const config = janitorConfig();
   const now = Date.now();
   const idleMs = config.IDLE_MINUTES * 60_000;
   const maxMs = config.MAX_MINUTES * 60_000 + LIFETIME_GRACE_MS;
   const gh = await github(config);
 
-  const [allInstances, runners] = await Promise.all([listRunnerInstances(ec2, config.RUNNER_PREFIX), gh.listRunners(`${config.RUNNER_PREFIX}-`)]);
+  const [ec2Instances, runners] = await Promise.all([listRunnerInstances(ec2, config.RUNNER_PREFIX), gh.listRunners(`${config.RUNNER_PREFIX}-`)]);
+  // The MicroVMs of idle MicroVM runners, in the shape of instances, so the
+  // idle and stale checks below cover both kinds of runner.
+  const allInstances = [...ec2Instances, ...(await describeMicrovmRunners(microvms, runners))];
   const runnersByName = new Map(runners.map((r) => [r.name, r]));
   const instances = allInstances.filter((i) => i.state === "pending" || i.state === "running");
 
@@ -44,7 +61,14 @@ export async function janitor(): Promise<{ terminated: string[]; removedRunners:
       log("terminating idle instance", { ...inst, ageMinutes: Math.round(age / 60_000), runnerStatus: runner?.status ?? "missing" });
     }
   }
-  await terminateInstances(ec2, toTerminate);
+  await terminateInstances(
+    ec2,
+    toTerminate.filter((id) => !isMicrovmId(id)),
+  );
+  await terminateMicrovms(
+    microvms,
+    toTerminate.filter((id) => isMicrovmId(id)),
+  );
 
   // Counts each idle runner against the job it was launched for. The
   // reconciler stops launching for a job whose runners keep going unused.
@@ -74,11 +98,46 @@ export async function janitor(): Promise<{ terminated: string[]; removedRunners:
     return [];
   });
 
+  const microvmImage = await keepMicrovmImageCurrent(config, gh);
+
   log("janitor done", {
     instances: instances.length,
     terminated: toTerminate.length,
     staleRunnersRemoved: stale.length,
     launchTemplateVersionsDeleted: deletedVersions.length,
+    microvmImage,
   });
-  return { terminated: toTerminate, removedRunners: stale.map((r) => r.name), deletedVersions };
+  return { terminated: toTerminate, removedRunners: stale.map((r) => r.name), deletedVersions, microvmImage };
+}
+
+// Builds or refreshes the MicroVM image (microvm-image.ts) and alerts once
+// when a build fails. A failure here is logged and leaves the rest of the
+// janitor's work done: MicroVM jobs fall back to EC2 runners meanwhile.
+async function keepMicrovmImageCurrent(config: JanitorConfig, gh: GitHubClient): Promise<ImageStatus | "error"> {
+  try {
+    const result = await ensureMicrovmImage(microvms, s3, {
+      imageName: config.MICROVM_IMAGE_NAME,
+      imageArn: config.MICROVM_IMAGE_ARN,
+      region: config.AWS_REGION,
+      memoryMiB: config.MICROVM_MEMORY_MIB,
+      buildRoleArn: config.MICROVM_BUILD_ROLE_ARN,
+      sourceBucket: config.MICROVM_SOURCE_BUCKET,
+      runner: await gh.runnerDownload(config.RUNNER_VERSION, "arm64"),
+      ghCli: await gh.ghCliDownload(),
+      maxMinutes: config.MAX_MINUTES,
+    });
+    if (result.failure?.newlyFailed) {
+      await alert(
+        config.ALERT_TOPIC_ARN,
+        "MicroVM image build failed",
+        `Version ${result.failure.version} of MicroVM image ${config.MICROVM_IMAGE_NAME} failed to build: ${result.failure.reason}\n\n` +
+          `Jobs labelled for MicroVMs run on EC2 runners until a build succeeds. The build log is in /aws/lambda-microvms/${config.MICROVM_IMAGE_NAME}. ` +
+          `The janitor retries the build in 6 hours, or sooner when the runner release or the image source changes.`,
+      );
+    }
+    return result.status;
+  } catch (err) {
+    log("failed to keep the MicroVM image current", { error: errorMessage(err) });
+    return "error";
+  }
 }

@@ -10,7 +10,7 @@ import { loadSecret } from "./app-secret.ts";
 import { webhookConfig } from "./config.ts";
 import { verifySignature, type WorkflowJobEvent } from "./github.ts";
 import { jobStore } from "./jobs.ts";
-import { JobConfigError, hasTriggerLabel, parseLabels } from "./labels.ts";
+import { JobConfigError, isStackJob, jobKind } from "./labels.ts";
 import { log } from "./log.ts";
 import { parseRunnerName } from "./pool.ts";
 
@@ -44,7 +44,8 @@ export async function webhook(event: LambdaFunctionURLEvent): Promise<APIGateway
   if (payload.organization?.login.toLowerCase() !== config.GITHUB_ORG.toLowerCase()) {
     return { statusCode: 200, body: "ignored: other org" };
   }
-  if (!hasTriggerLabel(job.labels, config.TRIGGER_LABEL)) return { statusCode: 200, body: "ignored: no trigger label" };
+  const kindLabels = { ec2Label: config.TRIGGER_LABEL, microvmLabel: config.MICROVM_LABEL };
+  if (!isStackJob(job.labels, kindLabels)) return { statusCode: 200, body: "ignored: no trigger label" };
 
   switch (payload.action) {
     case "queued": {
@@ -55,7 +56,7 @@ export async function webhook(event: LambdaFunctionURLEvent): Promise<APIGateway
         return { statusCode: 200, body: "ignored: public repository" };
       }
       try {
-        parseLabels(job.labels);
+        jobKind(job.labels, kindLabels);
       } catch (err) {
         if (!(err instanceof JobConfigError)) throw err;
         log("invalid job labels", { jobId: job.id, labels: job.labels, error: err.message });

@@ -9,16 +9,18 @@
 import { randomUUID } from "node:crypto";
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import { EC2Client } from "@aws-sdk/client-ec2";
+import { LambdaMicrovmsClient } from "@aws-sdk/client-lambda-microvms";
 import type { Context } from "aws-lambda";
 import { alert } from "./alerts.ts";
 import { github } from "./app-secret.ts";
 import { reconcilerConfig, type ReconcilerConfig } from "./config.ts";
 import { assertInstanceTypesExist, launchRunner, listRunnerInstances, resolveAmi, terminateInstances, type Ami } from "./ec2.ts";
-import { isGitHubError, type GitHubClient, type RunnerDownload } from "./github.ts";
+import { isGitHubError, type GitHubClient, type ReleaseDownload } from "./github.ts";
 import { jobStore, type JobStore, type QueuedJob } from "./jobs.ts";
-import { JobConfigError, hasTriggerLabel, parseLabels } from "./labels.ts";
+import { JobConfigError, isStackJob, jobKind, parseLabels } from "./labels.ts";
 import { ReconcileLock } from "./lock.ts";
 import { errorMessage, log } from "./log.ts";
+import { MICROVM_ID_LABEL, describeMicrovmRunners, isMicrovmId, launchMicrovm, terminateMicrovms } from "./microvm.ts";
 import { LAUNCH_GRACE_MS, availableRunners, matchJobs, retirableRunners, runnerName, type AvailableRunner } from "./pool.ts";
 import { RUNNER_WORK_DIR, buildUserData } from "./userdata.ts";
 
@@ -54,6 +56,11 @@ const QUEUE_LIMIT_MS = 24 * 60 * 60_000;
 const BACKFILL_CONCURRENCY = 4;
 
 const ec2 = new EC2Client({});
+// The account's RunMicrovm rate quota starts at one request per second.
+// Adaptive retry spaces out requests on the client after a throttle, so a
+// burst of MicroVM jobs launches one after another instead of failing over to
+// EC2.
+const microvms = new LambdaMicrovmsClient({ retryMode: "adaptive", maxAttempts: 6 });
 let cachedLock: ReconcileLock | undefined;
 
 type LaunchOutcome = "launched" | "already started" | "gone" | "failed" | "will retry" | "error" | "deferred";
@@ -120,7 +127,7 @@ async function backfillQueuedJobs(config: ReconcilerConfig): Promise<void> {
   await forEachLimit(repos, BACKFILL_CONCURRENCY, async (repo) => {
     try {
       for (const job of await gh.listQueuedJobs(repo.full_name, since)) {
-        if (!hasTriggerLabel(job.labels, config.TRIGGER_LABEL)) continue;
+        if (!isStackJob(job.labels, kindLabels(config))) continue;
         if (await jobs.markQueued({ jobId: job.id, repo: repo.full_name, runId: job.run_id, labels: job.labels })) {
           recorded.push({ repo: repo.full_name, jobId: job.id });
         }
@@ -173,7 +180,15 @@ async function reconcilePass(config: ReconcilerConfig, context?: Pick<Context, "
     gh.listRunners(`${config.RUNNER_PREFIX}-`),
     listRunnerInstances(ec2, config.RUNNER_PREFIX),
   ]);
-  const available = availableRunners({ prefix: config.RUNNER_PREFIX, registrations, instances, now, graceMs: LAUNCH_GRACE_MS });
+  // MicroVM runners join the pool in the shape of EC2 instances.
+  const vms = await describeMicrovmRunners(microvms, registrations);
+  const available = availableRunners({
+    prefix: config.RUNNER_PREFIX,
+    registrations,
+    instances: [...instances, ...vms],
+    now,
+    graceMs: LAUNCH_GRACE_MS,
+  });
   const { uncovered, spare } = matchJobs(queued, available);
 
   const outcomes: Record<string, LaunchOutcome> = {};
@@ -199,13 +214,14 @@ async function reconcilePass(config: ReconcilerConfig, context?: Pick<Context, "
 // Removes runners that no queued job needs, so a job cancelled before it
 // started does not leave its runner idling until the janitor's IdleMinutes.
 // The registration goes first, so GitHub cannot assign the runner a job while
-// its instance terminates. Returns the names of the runners removed.
+// its instance or MicroVM terminates. Returns the names of the runners removed.
 async function retireRunners(gh: GitHubClient, runners: readonly (AvailableRunner & { instanceId: string })[]): Promise<string[]> {
   const retired: string[] = [];
   for (const runner of runners) {
     try {
       await gh.deleteRunner(runner.id);
-      await terminateInstances(ec2, [runner.instanceId]);
+      if (isMicrovmId(runner.instanceId)) await terminateMicrovms(microvms, [runner.instanceId]);
+      else await terminateInstances(ec2, [runner.instanceId]);
       retired.push(runner.name);
     } catch (err) {
       log("failed to retire spare runner; the janitor will terminate it", { name: runner.name, error: errorMessage(err) });
@@ -308,11 +324,58 @@ async function reconcileJob(config: ReconcilerConfig, jobs: JobStore, gh: GitHub
   }
 }
 
-// Registers a just-in-time runner for one job and launches its instance. Any
-// job whose labels the runner has can end up on it. Throws JobConfigError
-// when the job's labels can never launch, and other errors for failures a
-// retry may get past, such as a lack of capacity.
+const kindLabels = (config: ReconcilerConfig) => ({ ec2Label: config.TRIGGER_LABEL, microvmLabel: config.MICROVM_LABEL });
+
+// Registers a just-in-time runner for one job and launches it: a MicroVM for a
+// MicroVM job, and an EC2 instance for an EC2 job or for a MicroVM job whose
+// MicroVM did not launch (the account's MicroVM memory quota is full, the
+// image is still building, or the MicroVM service failed). Any job whose
+// labels the runner has can end up on it, and an EC2 runner registered with a
+// MicroVM job's labels takes MicroVM jobs like a MicroVM runner does. Throws
+// JobConfigError when the job's labels can never launch, and other errors for
+// failures a retry may get past, such as a lack of capacity.
 async function launchForJob(config: ReconcilerConfig, gh: GitHubClient, job: QueuedJob): Promise<void> {
+  if (jobKind(job.labels, kindLabels(config)) === "microvm") {
+    try {
+      await launchMicrovmForJob(config, gh, job);
+      return;
+    } catch (err) {
+      log("MicroVM launch failed, launching an EC2 runner instead", { jobId: job.jobId, repo: job.repo, error: errorMessage(err) });
+    }
+  }
+  await launchEc2ForJob(config, gh, job);
+}
+
+// Registers a just-in-time runner and starts a MicroVM for it, then labels
+// the registration with the MicroVM's ID (see microvm.ts). A failure leaves
+// neither a registration nor a MicroVM behind.
+async function launchMicrovmForJob(config: ReconcilerConfig, gh: GitHubClient, job: QueuedJob): Promise<void> {
+  const name = runnerName(config.RUNNER_PREFIX, job.jobId);
+  const jit = await gh.generateJitConfig({ name, labels: job.labels, runnerGroupId: config.RUNNER_GROUP_ID, workFolder: RUNNER_WORK_DIR });
+  let microvmId: string | undefined;
+  try {
+    microvmId = await launchMicrovm(microvms, {
+      imageArn: config.MICROVM_IMAGE_ARN,
+      executionRoleArn: config.MICROVM_EXECUTION_ROLE_ARN,
+      region: config.AWS_REGION,
+      encodedJitConfig: jit.encoded_jit_config,
+      maxMinutes: config.MAX_MINUTES,
+    });
+    await gh.addRunnerLabels(jit.runner.id, [`${MICROVM_ID_LABEL}=${microvmId}`]);
+  } catch (err) {
+    if (microvmId) {
+      await terminateMicrovms(microvms, [microvmId]).catch((e) =>
+        log("failed to terminate MicroVM after launch error", { microvmId, error: errorMessage(e) }),
+      );
+    }
+    await gh.deleteRunner(jit.runner.id).catch((e) => log("failed to delete runner after launch error", { name, error: errorMessage(e) }));
+    throw err;
+  }
+  log("launched MicroVM runner", { name, repo: job.repo, jobId: job.jobId, microvmId });
+}
+
+// Registers a just-in-time runner for one job and launches its EC2 instance.
+async function launchEc2ForJob(config: ReconcilerConfig, gh: GitHubClient, job: QueuedJob): Promise<void> {
   const spec = { ...parseLabels(job.labels), cpuBaselineFamily: config.CPU_BASELINE_FAMILY || undefined };
   // Everything that can reject the job's labels runs before the runner is
   // registered, so a bad label leaves no registration behind.
@@ -352,8 +415,8 @@ async function launchForJob(config: ReconcilerConfig, gh: GitHubClient, job: Que
 }
 
 // The runner tarball for each AMI architecture.
-const downloads = new Map<string, { download: RunnerDownload; at: number }>();
-async function runnerDownload(config: ReconcilerConfig, gh: GitHubClient, ami: Ami): Promise<RunnerDownload> {
+const downloads = new Map<string, { download: ReleaseDownload; at: number }>();
+async function runnerDownload(config: ReconcilerConfig, gh: GitHubClient, ami: Ami): Promise<ReleaseDownload> {
   const arch = ami.architecture === "arm64" ? "arm64" : "x64";
   const cached = downloads.get(arch);
   if (cached && Date.now() - cached.at < CACHE_MS) return cached.download;

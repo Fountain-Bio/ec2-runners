@@ -1,13 +1,13 @@
 # ec2-runners
 
-Ephemeral GitHub Actions runners on EC2 Spot for the example-org org, deployed as one CloudFormation stack. Each job that asks for an EC2 runner gets a fresh instance sized from its labels. The instance runs that one job and terminates itself.
+Ephemeral GitHub Actions runners on EC2 Spot and AWS Lambda MicroVMs for the example-org org, deployed as one CloudFormation stack. Each job that asks for an EC2 runner gets a fresh instance sized from its labels. Each job that asks for a MicroVM runner gets a fresh Lambda MicroVM, which starts in seconds, for short jobs. A runner runs its one job and terminates itself.
 
 ## How it works
 
-1. GitHub sends a `workflow_job` webhook to a Lambda function URL (`<stack>-webhook`). The function checks the HMAC signature and keeps only jobs whose labels include `ec2`. It records each queued job from a private repository in a DynamoDB table (`<stack>-jobs`), marks jobs done when they start or finish, and invokes the reconciler asynchronously.
-2. The reconciler (`<stack>-reconciler`) compares the queued jobs with the runners that could still take them: registered, idle, and either running or still launching. It launches a runner for each job those runners cannot cover. Before launching, it confirms with the GitHub API that the job is still queued, finds the newest matching AMI, and checks that some instance type matches the labels. It then registers a just-in-time runner with the job's labels and calls EC2 Fleet (`instant`) with attribute-based instance selection, one subnet per call in shuffled order, trying Spot with `price-capacity-optimized` in each subnet first, then On-Demand.
+1. GitHub sends a `workflow_job` webhook to a Lambda function URL (`<stack>-webhook`). The function checks the HMAC signature and keeps only jobs whose labels include `ec2` or `microvm`. It records each queued job from a private repository in a DynamoDB table (`<stack>-jobs`), marks jobs done when they start or finish, and invokes the reconciler asynchronously.
+2. The reconciler (`<stack>-reconciler`) compares the queued jobs with the runners that could still take them: registered, idle, and either running or still launching. It launches a runner for each job those runners cannot cover. Before launching, it confirms with the GitHub API that the job is still queued, finds the newest matching AMI, and checks that some instance type matches the labels. It then registers a just-in-time runner with the job's labels and calls EC2 Fleet (`instant`) with attribute-based instance selection, one subnet per call in shuffled order, trying Spot with `price-capacity-optimized` in each subnet first, then On-Demand. A `microvm` job gets a Lambda MicroVM instead (see [MicroVM runners](#microvm-runners)).
 3. The instance boot script runs `run.sh --jitconfig`, executes the job, and powers off. The launch template sets shutdown behavior to `terminate`, so power-off deletes the instance.
-4. The janitor (`<stack>-janitor`, every 5 minutes) terminates instances that have not started a job within `IdleMinutes` or have run longer than `MaxMinutes`, removes runner registrations whose instance has ended or never appeared, and deletes launch template versions left by a reconciler that stopped partway. The same schedule also runs the reconciler, which retries launches that still failed after a reconcile's own retries, replaces runners the janitor terminated for still-queued jobs, and catches up on reconciles that the webhook could not invoke. GitHub sometimes never sends a job's `queued` webhook, and a delivery can also fail, which leaves the job out of the jobs table. Before each scheduled reconcile, the reconciler therefore lists the queued jobs in the workflow runs of the last 24 hours in every private repository the GitHub App can access (public ones too when `AllowPublicRepos` is true), and records those with the `ec2` label that the table lacks. Such a job waits at most about 5 minutes for its runner. The reconciler's log records each one as `recorded queued jobs whose webhook never arrived`.
+4. The janitor (`<stack>-janitor`, every 5 minutes) terminates instances that have not started a job within `IdleMinutes` or have run longer than `MaxMinutes`, removes runner registrations whose instance has ended or never appeared, and deletes launch template versions left by a reconciler that stopped partway. The same schedule also runs the reconciler, which retries launches that still failed after a reconcile's own retries, replaces runners the janitor terminated for still-queued jobs, and catches up on reconciles that the webhook could not invoke. GitHub sometimes never sends a job's `queued` webhook, and a delivery can also fail, which leaves the job out of the jobs table. Before each scheduled reconcile, the reconciler therefore lists the queued jobs in the workflow runs of the last 24 hours in every private repository the GitHub App can access (public ones too when `AllowPublicRepos` is true), and records those with the `ec2` or `microvm` label that the table lacks. Such a job waits at most about 5 minutes for its runner. The reconciler's log records each one as `recorded queued jobs whose webhook never arrived`.
 
 ### Why the reconciler matches jobs to runners
 
@@ -27,6 +27,7 @@ The `<stack>-alerts` SNS topic receives these alerts and passes them to Slack (s
 - A job that has failed to launch ten times, for example for lack of Spot capacity or vCPU quota. A reconcile whose launch fails retries it 30 seconds later, up to 6 passes per invocation, and the 5-minute schedule picks the job up after that. Ten failures take about 5 minutes.
 - A job whose runners keep going unused. When two runners launched for a job sit idle until the janitor terminates them while the job is still queued, GitHub is not assigning the job to them. Usually the runner group does not allow the job's repository. The reconciler stops launching for that job.
 - The runner group allows public repositories while `AllowPublicRepos` is false. No runners launch until one of the two settings changes.
+- A MicroVM image build failed. MicroVM jobs run on EC2 runners until a build succeeds. The janitor retries after 6 hours, or sooner when the runner or gh release or the image source changes. The build log is in `/aws/lambda-microvms/<stack>-runner`.
 - CloudWatch alarms, both when they fire and when they clear:
   - `<stack>-webhook-errors`: the webhook failed on a delivery. GitHub does not retry it. The next scheduled reconcile records the job if it is still queued, so fixing the cause is the only action needed.
   - `<stack>-webhook-invalid-signatures`: three or more deliveries in 15 minutes failed signature checks, which usually means the webhook secret in GitHub differs from the one in the app secret.
@@ -74,6 +75,31 @@ Every job also gets these variables, usable in shells and as `${{ env.NAME }}` i
 The cache bucket is shared by every repository and branch that uses these runners, and every job can read and write all of it. A job in one repository can therefore replace a cache entry that a build in another repository restores. Treat cached content as trusted only as far as everyone who can push a branch in the org is trusted.
 
 The `full` images are ports of GitHub's hosted runner images, so actions that work on `ubuntu-latest` generally work here. `runs-on/cache` reads the bucket name from `RUNS_ON_S3_BUCKET_CACHE`, which the boot script sets for every job, and authenticates with the instance profile. On GitHub-hosted runners the variable is absent and `runs-on/cache` falls back to GitHub's cache.
+
+## MicroVM runners
+
+A job labelled `microvm` runs in an AWS Lambda MicroVM: a Firecracker VM that Lambda starts from a snapshot of the stack's MicroVM image. From a job being queued to the job starting takes about 10 seconds, against about 30 to 45 for an EC2 runner, so short jobs such as path filters, status gates, and review bots spend more of their time working.
+
+```yaml
+jobs:
+  changes:
+    runs-on: microvm
+    steps:
+      - run: gh api "repos/$GITHUB_REPOSITORY/pulls/${{ github.event.pull_request.number }}/files" --jq '.[].filename'
+        env:
+          GH_TOKEN: ${{ github.token }}
+```
+
+A MicroVM runner is an Amazon Linux 2023 container on ARM64 with the actions runner, `git`, `gh`, `jq`, `tar`, `unzip`, and Python 3. JavaScript actions run on the Node.js that the actions runner bundles. Each MicroVM has `MicrovmMemoryMiB` of memory (2 GiB by default) with 1 vCPU per 2 GiB, and Lambda lets it burst to 4 times that while the job needs it. It has no Docker, no AWS credentials, and no cache bucket, so jobs that build images, call AWS, or use `runs-on/cache` belong on `ec2` runners. A job cannot ask for both labels, and a `microvm` job cannot set EC2 labels such as `cpu=`; the webhook alerts on either.
+
+How it works:
+
+- **Image.** The janitor builds the image `<stack>-runner` on its first run after a deploy, which takes about three minutes, and rebuilds it when the actions runner or gh release, the image source in `src/microvm-image.ts`, or `MicrovmMemoryMiB` changes, and when the image is 30 days old, which keeps it ahead of Lambda's base image deprecations. Lambda builds it from a zip that the janitor writes to a bucket that runners cannot write to. The janitor deletes image versions once no MicroVM can still be running on them.
+- **Launch.** The reconciler registers a just-in-time runner and calls `RunMicrovm`, passing the gzipped JIT config to the image's `/run` hook, which starts the runner. RunMicrovm limits that payload to 4,096 characters, and an encoded JIT config is about 4,100, hence the gzip. The MicroVM accepts no inbound connections and has no idle policy, since Lambda measures idleness by inbound traffic, which a runner never gets. When the runner exits after its job, the container exits and Lambda terminates the MicroVM. Lambda also terminates it after `MaxMinutes`.
+- **Pool.** MicroVMs have no tags, so after the launch the reconciler adds a `microvm-id=<id>` label to the runner's GitHub registration, and the reconciler and janitor read that label to find an idle runner's MicroVM. The MicroVM runners join the pool described above: a spare one is retired, an idle one is terminated after `IdleMinutes`, and a registration whose MicroVM ended is removed.
+- **Fallback to EC2.** When a MicroVM does not launch, because the account's MicroVM memory quota is full, the image is still building, or the service fails, the reconciler launches an EC2 runner for the job instead, of the default size and image and with the job's labels, so it can take the `microvm` job. The reconciler's log records each one as `MicroVM launch failed, launching an EC2 runner instead`.
+
+The account quota **Max allocated ARM_64 MicroVM memory** caps how many MicroVM runners run at once: the quota divided by `MicrovmMemoryMiB`. The quota **Rate of RunMicrovm API requests** caps launches per second; the reconciler's MicroVM client backs off and retries when Lambda throttles it.
 
 ## Docker builds
 
@@ -184,12 +210,14 @@ Push a workflow with `runs-on: [ec2]`. In the GitHub App's Advanced tab, recent 
 | Parameter | Default | Meaning |
 | --- | --- | --- |
 | `GitHubOrg` | `example-org` | Org the app is installed on. Webhooks from other orgs are ignored. |
-| `TriggerLabel` | `ec2` | Label that opts a job in. |
+| `TriggerLabel` | `ec2` | Label that opts a job in to an EC2 runner. |
+| `MicrovmLabel` | `microvm` | Label that opts a job in to a MicroVM runner. See [MicroVM runners](#microvm-runners). |
+| `MicrovmMemoryMiB` | `2048` | Baseline memory of each MicroVM runner: 512, 1024, 2048, 4096, or 8192. Lambda gives 1 vCPU per 2048 MiB. Changing it rebuilds the image. |
 | `RunnerGroupId` | `1` | Org runner group for registrations. |
 | `IdleMinutes` | `20` | Kill an instance that has not started a job after this long. A backstop for runners the reconciler did not retire, such as one whose runner process failed to connect. |
-| `MaxMinutes` | `360` | Hard instance lifetime, enforced both by the boot script and the janitor. |
+| `MaxMinutes` | `360` | Hard runner lifetime, enforced by the boot script and the janitor for instances and by Lambda for MicroVMs (at most 480). |
 | `AmiOwner`, `AmiNamePrefix` | RunsOn public images | Where `image=` names are looked up. |
-| `RunnerVersion` | `latest` | actions/runner version to download when the AMI does not have one at `/opt/ec2-runner`. The boot script checks the download against the SHA-256 digest GitHub publishes for the release asset, so the version must be 2.325.0 or later. |
+| `RunnerVersion` | `latest` | actions/runner version to download when the AMI does not have one at `/opt/ec2-runner`, and to build into the MicroVM image. The boot script checks the download against the SHA-256 digest GitHub publishes for the release asset, so the version must be 2.325.0 or later. |
 | `CpuBaselineFamily` | `m6i` | Slowest CPU a runner may get, as an instance family. Excludes older types such as `i3` and `m5d` that EC2's "current generation" filter still allows and that are often the cheapest Spot types with local SSDs. Empty turns the floor off. A compute-family reference such as `c6i` matches no instance type for jobs with 4 GiB or more per vCPU. |
 | `CacheRetentionDays` | `10` | Lifecycle expiry on the cache bucket. |
 | `VpcCidr` | `10.42.0.0/16` | VPC range, split into three /20 subnets. |

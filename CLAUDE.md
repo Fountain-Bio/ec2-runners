@@ -9,7 +9,7 @@ Ephemeral GitHub Actions runners on EC2 Spot for the example-org org, deployed a
 
 ## The runner pool
 
-GitHub hands a queued job to any idle runner whose labels include all of the job's labels, whichever job the runner was launched for. The reconciler therefore treats runners as a **pool**: each pass matches queued jobs to available runners (`src/pool.ts`, maximum bipartite matching), launches only for jobs left without one, and retires spare runners whose own job no longer waits. Keep that model when changing launch logic: a runner's name records the job it was launched for, never the job it will run.
+GitHub hands a queued job to any idle runner whose labels include all of the job's labels, whichever job the runner was launched for. The reconciler therefore treats runners as a **pool**: each pass matches queued jobs to available runners (`src/pool.ts`, maximum bipartite matching), launches only for jobs left without one, and retires spare runners whose own job no longer waits. Keep that model when changing launch logic: a runner's name records the job it was launched for, never the job it will run. MicroVM runners (`src/microvm.ts`) are in the same pool: their registrations carry a `microvm-id=<id>` label that stands in for EC2's instance tags.
 
 Reconcile passes never overlap. The lock is one item in the jobs table (`jobId` 0, `src/lock.ts`); an invocation that finds it held records a rerun request and exits.
 
@@ -26,3 +26,4 @@ These were set up by hand in the development account, and the stack must not cre
 
 - The Amazon Q Developer (Chatbot) channel configuration `slack-alerts` for #alerts, which subscribes to the stack's alert topic (README, setup step 2). A Slack channel allows one configuration per account, so a stack-owned one fails to deploy.
 - Quotas: Lambda concurrency 1,000, Spot 256 vCPUs, On-Demand 16 vCPUs. One monorepo CI run uses 44 Spot vCPUs.
+- Lambda MicroVM quotas in us-west-2: **Max allocated ARM_64 MicroVM memory** is 2,048 GB (1,024 runners at the default 2048 MiB), and **Rate of RunMicrovm API requests** and its burst rate are 5 per second. New accounts can start with these quotas below the AWS defaults, and Service Quotas rejects a request below the default, so raising one takes a support case. A full memory quota sends MicroVM jobs to EC2 runners.

@@ -1,8 +1,11 @@
 import { beforeEach, expect, test } from "vite-plus/test";
 import { createHmac, generateKeyPairSync } from "node:crypto";
+import { gunzipSync } from "node:zlib";
 import { ConditionalCheckFailedException } from "@aws-sdk/client-dynamodb";
 import { EC2Client } from "@aws-sdk/client-ec2";
 import { LambdaClient } from "@aws-sdk/client-lambda";
+import { LambdaMicrovmsClient, ServiceQuotaExceededException } from "@aws-sdk/client-lambda-microvms";
+import { S3Client } from "@aws-sdk/client-s3";
 import { SecretsManagerClient } from "@aws-sdk/client-secrets-manager";
 import { SNSClient } from "@aws-sdk/client-sns";
 import { DynamoDBDocumentClient } from "@aws-sdk/lib-dynamodb";
@@ -44,6 +47,13 @@ Object.assign(process.env, {
   CPU_BASELINE_FAMILY: "m6i",
   BOOT_LOG_GROUP: "/ec2-runners/ec2-runners/boot",
   ALLOW_PUBLIC_REPOS: "false",
+  MICROVM_LABEL: "microvm",
+  MICROVM_IMAGE_ARN: "arn:aws:lambda:us-west-2:123456789012:microvm-image:ec2-runners-runner",
+  MICROVM_EXECUTION_ROLE_ARN: "arn:aws:iam::123456789012:role/microvm-exec",
+  MICROVM_IMAGE_NAME: "ec2-runners-runner",
+  MICROVM_MEMORY_MIB: "2048",
+  MICROVM_BUILD_ROLE_ARN: "arn:aws:iam::123456789012:role/microvm-build",
+  MICROVM_SOURCE_BUCKET: "microvm-source",
 });
 
 // Tests can move the clock forward but never back: the GitHub client's
@@ -78,6 +88,27 @@ Object.assign(SNSClient.prototype, {
 });
 Object.assign(EC2Client.prototype, {
   send: async (cmd: Command) => (record(cmd), ec2Handler(cmd.constructor.name, cmd.input)),
+});
+// Lambda MicroVMs: RunMicrovm starts "microvm-1", and the image is current
+// unless a test says otherwise. A handler that throws makes the call fail.
+let microvmHandler: (name: string, input: any) => object = () => ({});
+const microvmsWith =
+  ({ microvms = {} as Record<string, { state: string; startedMinutesAgo: number }>, run = () => ({ microvmId: "microvm-1" }) as object } = {}) =>
+  (name: string, input: any): object => {
+    if (name === "RunMicrovmCommand") return run();
+    if (name === "GetMicrovmCommand") {
+      const vm = microvms[input.microvmIdentifier];
+      if (!vm) throw new Error(`no MicroVM ${input.microvmIdentifier}`);
+      return { microvmId: input.microvmIdentifier, state: vm.state, startedAt: new Date(Date.now() - vm.startedMinutesAgo * 60_000) };
+    }
+    if (name === "GetMicrovmImageCommand") return { imageArn: process.env.MICROVM_IMAGE_ARN, state: "UPDATED" };
+    return {};
+  };
+Object.assign(LambdaMicrovmsClient.prototype, {
+  send: async (cmd: Command) => (record(cmd), microvmHandler(cmd.constructor.name, cmd.input)),
+});
+Object.assign(S3Client.prototype, {
+  send: async (cmd: Command) => (record(cmd), {}),
 });
 
 // ---- Jobs table stub: an in-memory table that understands the store's requests ----
@@ -148,6 +179,10 @@ Object.assign(globalThis, {
         labels: body.labels.map((name: string) => ({ name })),
       });
     }
+    const labelled = /^POST \/orgs\/example-org\/actions\/runners\/(\d+)\/labels$/.exec(key);
+    if (labelled && status === 200) {
+      for (const r of registered) if (r.id === Number(labelled[1])) r.labels.push(...body.labels.map((name: string) => ({ name })));
+    }
     const deleted = /^DELETE \/orgs\/example-org\/actions\/runners\/(\d+)$/.exec(key);
     if (deleted && status === 204) registered = registered.filter((r) => r.id !== Number(deleted[1]));
     if (key === "GET /orgs/example-org/actions/runners" && responseBody) {
@@ -180,12 +215,25 @@ const baseRoutes = (): Record<string, Route> => ({
       })),
     },
   },
+  "GET /repos/cli/cli/releases/latest": {
+    body: {
+      tag_name: "v2.103.3",
+      assets: [
+        {
+          name: "gh_2.103.3_linux_arm64.tar.gz",
+          browser_download_url: "https://github.com/cli/cli/releases/download/v2.103.3/gh_2.103.3_linux_arm64.tar.gz",
+          digest: `sha256:${RUNNER_SHA256}`,
+        },
+      ],
+    },
+  },
   "GET /orgs/example-org/actions/runners": { body: { total_count: 0, runners: [] } },
   "GET /orgs/example-org/actions/runner-groups/1": { body: { id: 1, name: "Default", allows_public_repositories: false } },
   "POST /orgs/example-org/actions/runners/generate-jitconfig": {
     status: 201,
     body: { runner: { id: 1001, name: "registered" }, encoded_jit_config: "JITCFG" },
   },
+  "POST /orgs/example-org/actions/runners/1001/labels": { body: { total_count: 1, labels: [] } },
 });
 
 // GitHub's view of a job, for GET /repos/{repo}/actions/jobs/{id}.
@@ -257,6 +305,7 @@ beforeEach(() => {
   ghRoutes = baseRoutes();
   registered = [];
   ec2Handler = ec2With();
+  microvmHandler = microvmsWith();
   table = new Map();
 });
 
@@ -760,4 +809,173 @@ test("janitor terminates idle and expired instances and removes stale registrati
   expect(result.deletedVersions).toEqual(["9"]);
   const terminate = awsCalls.find((c) => c.name === "TerminateInstancesCommand")!;
   expect(terminate.input.InstanceIds.sort()).toEqual(["i-idle", "i-old"]);
+});
+
+// ---- MicroVM runners ----
+
+// A JIT config as GitHub encodes it: base64 of a JSON document.
+const MICROVM_JIT = Buffer.from(JSON.stringify({ ".runner": "settings", ".credentials_rsaparams": "key" })).toString("base64");
+const runMicrovmCalls = () => awsCalls.filter((c) => c.name === "RunMicrovmCommand");
+const terminatedMicrovms = () => awsCalls.filter((c) => c.name === "TerminateMicrovmCommand").map((c) => c.input.microvmIdentifier);
+
+test("webhook records a queued microvm job and rejects microvm labels that can never launch", async () => {
+  expect((await webhook(delivery("workflow_job", jobEvent("queued", ["microvm"])))).statusCode).toBe(202);
+  expect(table.get(555)).toMatchObject({ labels: ["microvm"], status: "queued" });
+
+  for (const [id, labels, message] of [
+    [700, ["ec2", "microvm"], "not both"],
+    [701, ["microvm", "cpu=4"], "cpu=4 applies only to ec2 jobs"],
+  ] as const) {
+    const res = await webhook(delivery("workflow_job", jobEvent("queued", [...labels], { id })));
+    expect(res.statusCode).toBe(200);
+    expect(table.has(id)).toBe(false);
+    expect(alerts().at(-1)!.Message).toContain(message);
+  }
+});
+
+test("reconciler launches a MicroVM runner for a microvm job and labels its registration with the MicroVM", async () => {
+  ghRoutes["POST /orgs/example-org/actions/runners/generate-jitconfig"] = {
+    status: 201,
+    body: { runner: { id: 1001, name: "registered" }, encoded_jit_config: MICROVM_JIT },
+  };
+  queuedRow(555, ["microvm"]);
+  githubJob("example-org/app", 555);
+
+  const result = await reconciler();
+  expect(result.outcomes).toEqual({ 555: "launched" });
+  expect(fleetCalls()).toHaveLength(0);
+
+  const jit = ghCalls.find((c) => c.key.endsWith("generate-jitconfig"))!;
+  expect(jit.body).toMatchObject({ name: expect.stringMatching(/^ec2-runners-555-[0-9a-z]+$/), labels: ["microvm"] });
+  const run = runMicrovmCalls()[0]!.input;
+  expect(run).toMatchObject({
+    imageIdentifier: process.env.MICROVM_IMAGE_ARN,
+    executionRoleArn: process.env.MICROVM_EXECUTION_ROLE_ARN,
+    maximumDurationInSeconds: 360 * 60,
+    ingressNetworkConnectors: ["arn:aws:lambda:us-west-2:aws:network-connector:aws-network-connector:NO_INGRESS"],
+    egressNetworkConnectors: ["arn:aws:lambda:us-west-2:aws:network-connector:aws-network-connector:INTERNET_EGRESS"],
+  });
+  expect(run.idlePolicy).toBeUndefined();
+  // The payload is the gzipped JIT config, which the hook server unpacks.
+  expect(gunzipSync(Buffer.from(run.runHookPayload, "base64")).toString("base64")).toBe(MICROVM_JIT);
+  const label = ghCalls.find((c) => c.key === "POST /orgs/example-org/actions/runners/1001/labels")!;
+  expect(label.body).toEqual({ labels: ["microvm-id=microvm-1"] });
+});
+
+test("reconciler launches an EC2 runner for a microvm job when no MicroVM launches", async () => {
+  microvmHandler = microvmsWith({
+    run: () => {
+      throw new ServiceQuotaExceededException({ message: "Max allocated ARM_64 MicroVM memory exceeded", $metadata: {} });
+    },
+  });
+  ghRoutes["DELETE /orgs/example-org/actions/runners/1001"] = { status: 204 };
+  queuedRow(555, ["microvm"]);
+  githubJob("example-org/app", 555);
+
+  const result = await reconciler();
+  expect(result.outcomes).toEqual({ 555: "launched" });
+  // The MicroVM's registration is removed, and a second one carries the EC2 runner.
+  expect(ghCalls.filter((c) => c.key.endsWith("generate-jitconfig"))).toHaveLength(2);
+  expect(ghCalls.some((c) => c.key === "DELETE /orgs/example-org/actions/runners/1001")).toBe(true);
+  expect(fleetCalls()).toHaveLength(1);
+  // The EC2 runner has the job's labels, so it can take the microvm job.
+  expect(ghCalls.filter((c) => c.key.endsWith("generate-jitconfig"))[1]!.body.labels).toEqual(["microvm"]);
+});
+
+test("reconciler terminates the MicroVM and falls back to EC2 when labelling its registration fails", async () => {
+  ghRoutes["POST /orgs/example-org/actions/runners/1001/labels"] = { status: 422, body: { message: "Validation Failed" } };
+  ghRoutes["DELETE /orgs/example-org/actions/runners/1001"] = { status: 204 };
+  queuedRow(555, ["microvm"]);
+  githubJob("example-org/app", 555);
+
+  const result = await reconciler();
+  expect(result.outcomes).toEqual({ 555: "launched" });
+  expect(terminatedMicrovms()).toEqual(["microvm-1"]);
+  expect(fleetCalls()).toHaveLength(1);
+});
+
+test("reconciler counts an idle MicroVM runner in the pool and retires it once its job is gone", async () => {
+  const own = runnerName(PREFIX, 555);
+  const spare = runnerName(PREFIX, 600);
+  ghRoutes["GET /orgs/example-org/actions/runners"] = {
+    body: {
+      total_count: 2,
+      runners: [registration(1, own, ["microvm", "microvm-id=microvm-a"]), registration(2, spare, ["microvm", "microvm-id=microvm-b"])],
+    },
+  };
+  ghRoutes["DELETE /orgs/example-org/actions/runners/2"] = { status: 204 };
+  microvmHandler = microvmsWith({
+    microvms: { "microvm-a": { state: "RUNNING", startedMinutesAgo: 1 }, "microvm-b": { state: "RUNNING", startedMinutesAgo: 1 } },
+  });
+  queuedRow(555, ["microvm"]);
+
+  const result = await reconciler();
+  // Job 555's own MicroVM covers it. Job 600 no longer waits, so its MicroVM goes.
+  expect(result).toMatchObject({ queued: 1, available: 2, outcomes: {}, retired: [spare] });
+  expect(runMicrovmCalls()).toHaveLength(0);
+  expect(terminatedMicrovms()).toEqual(["microvm-b"]);
+});
+
+test("janitor terminates idle MicroVM runners and removes registrations whose MicroVM ended", async () => {
+  const name = (jobId: number, minutesAgo: number) => runnerName(PREFIX, jobId, Date.now() - minutesAgo * 60_000);
+  const [young, idle, ended, busy] = [name(1, 2), name(2, 30), name(3, 30), name(4, 30)];
+  ec2Handler = ec2With({ instances: [] });
+  ghRoutes["GET /orgs/example-org/actions/runners"] = {
+    body: {
+      total_count: 4,
+      runners: [
+        registration(1, young, ["microvm", "microvm-id=microvm-young"]),
+        registration(2, idle, ["microvm", "microvm-id=microvm-idle"]),
+        registration(3, ended, ["microvm", "microvm-id=microvm-ended"]),
+        // busy runners are not looked up: the MicroVM's maximum duration bounds them
+        registration(4, busy, ["microvm", "microvm-id=microvm-busy"], true),
+      ],
+    },
+  };
+  for (const id of [2, 3]) ghRoutes[`DELETE /orgs/example-org/actions/runners/${id}`] = { status: 204 };
+  microvmHandler = microvmsWith({
+    microvms: {
+      "microvm-young": { state: "RUNNING", startedMinutesAgo: 2 },
+      "microvm-idle": { state: "RUNNING", startedMinutesAgo: 30 },
+      "microvm-ended": { state: "TERMINATED", startedMinutesAgo: 30 },
+    },
+  });
+  queuedRow(2, ["microvm"]);
+
+  const result = await janitor();
+  expect(result.terminated).toEqual(["microvm-idle"]);
+  expect(terminatedMicrovms()).toEqual(["microvm-idle"]);
+  expect(awsCalls.some((c) => c.name === "TerminateInstancesCommand")).toBe(false);
+  expect(table.get(2)?.idleRunners).toBe(1);
+  expect(result.removedRunners.sort()).toEqual([idle, ended].sort());
+  expect(awsCalls.filter((c) => c.name === "GetMicrovmCommand").map((c) => c.input.microvmIdentifier)).not.toContain("microvm-busy");
+});
+
+test("janitor alerts once when the MicroVM image build fails", async () => {
+  // The image's latest build failed a minute ago with the inputs the janitor would build now.
+  let description = "";
+  microvmHandler = (name, input) => {
+    if (name === "GetMicrovmImageCommand")
+      return { imageArn: process.env.MICROVM_IMAGE_ARN, state: "UPDATE_FAILED", latestFailedImageVersion: "2.0" };
+    if (name === "GetMicrovmImageVersionCommand")
+      return {
+        imageVersion: input.imageVersion,
+        description,
+        state: "FAILED",
+        stateReason: "The container image build failed.",
+        updatedAt: new Date(Date.now() - 60_000),
+      };
+    return {};
+  };
+  // The first run builds, which records the description a build of these inputs carries.
+  const first = await janitor();
+  expect(first.microvmImage).toBe("build started");
+  description = awsCalls.find((c) => c.name === "UpdateMicrovmImageCommand")!.input.description;
+
+  awsCalls = [];
+  const second = await janitor();
+  expect(second.microvmImage).toBe("build failed");
+  expect(alerts()).toHaveLength(1);
+  expect(alerts()[0]!.Message).toContain("The container image build failed.");
+  expect(awsCalls.some((c) => c.name === "UpdateMicrovmImageCommand")).toBe(false);
 });

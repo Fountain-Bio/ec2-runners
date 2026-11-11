@@ -18,9 +18,15 @@ const githubClient = {
   GITHUB_SECOND_MS: z.coerce.number().nonnegative().default(1000),
 };
 
+// The labels that opt a job in to an EC2 runner and to a MicroVM runner.
+const kindLabels = {
+  TRIGGER_LABEL: z.string().min(1),
+  MICROVM_LABEL: z.string().min(1),
+};
+
 const WebhookConfig = z.object({
   ...common,
-  TRIGGER_LABEL: z.string().min(1),
+  ...kindLabels,
   RECONCILER_FUNCTION: z.string().min(1),
   JOBS_TABLE: z.string().min(1),
   ALERT_TOPIC_ARN: z.string().min(1),
@@ -32,7 +38,7 @@ const ReconcilerConfig = z.object({
   ...githubClient,
   // Set by the Lambda runtime.
   AWS_REGION: z.string().min(1),
-  TRIGGER_LABEL: z.string().min(1),
+  ...kindLabels,
   JOBS_TABLE: z.string().min(1),
   ALERT_TOPIC_ARN: z.string().min(1),
   ALLOW_PUBLIC_REPOS: z.stringbool(),
@@ -54,6 +60,9 @@ const ReconcilerConfig = z.object({
   CPU_BASELINE_FAMILY: z.string().default(""),
   // Seconds between a pass with a failed launch and the pass that retries it.
   RECONCILE_RETRY_SECONDS: z.coerce.number().nonnegative().default(30),
+  // The stack's MicroVM image, and the role its MicroVMs run with.
+  MICROVM_IMAGE_ARN: z.string().min(1),
+  MICROVM_EXECUTION_ROLE_ARN: z.string().min(1),
 });
 
 const JanitorConfig = z.object({
@@ -63,6 +72,18 @@ const JanitorConfig = z.object({
   IDLE_MINUTES: z.coerce.number().positive(),
   MAX_MINUTES: z.coerce.number().positive(),
   LAUNCH_TEMPLATE_ID: z.string().min(1),
+  // Set by the Lambda runtime.
+  AWS_REGION: z.string().min(1),
+  ALERT_TOPIC_ARN: z.string().min(1),
+  // The runner release the MicroVM image holds, "latest" or a version.
+  RUNNER_VERSION: z.string().min(1),
+  // The MicroVM image the janitor builds, its baseline memory, the role
+  // Lambda builds it with, and the bucket that holds its source zip.
+  MICROVM_IMAGE_NAME: z.string().min(1),
+  MICROVM_IMAGE_ARN: z.string().min(1),
+  MICROVM_MEMORY_MIB: z.coerce.number().int().positive(),
+  MICROVM_BUILD_ROLE_ARN: z.string().min(1),
+  MICROVM_SOURCE_BUCKET: z.string().min(1),
 });
 
 export type WebhookConfig = z.infer<typeof WebhookConfig>;
