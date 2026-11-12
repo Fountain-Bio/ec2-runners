@@ -1,7 +1,8 @@
 {
   "name": "ec2-runners",
   "private": true,
-  "description": "Ephemeral GitHub Actions runners on EC2 Spot, deployed as one CloudFormation stack.",
+  "description": "Ephemeral GitHub Actions runners on EC2 Spot and AWS Lambda MicroVMs, deployed as one CloudFormation stack.",
+  "license": "MIT",
   "type": "module",
   "scripts": {
     "check": "vp check",
