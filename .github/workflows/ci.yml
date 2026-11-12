@@ -18,7 +18,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       # Runs the docker-cache action from this checkout. A GitHub-hosted runner
       # has none of the cache variables the stack's boot script sets, so both
@@ -38,14 +38,14 @@ jobs:
 
       # Installs vp and Node.js 24, the Lambda runtime's version. vp provides
       # bun at the version in package.json's packageManager field.
-      - uses: voidzero-dev/setup-vp@v1.21.2
+      - uses: voidzero-dev/setup-vp@68f39c78aaf39be468cabd2afb09c162574c84af # v1.21.2
         with:
           node-version: "24"
           cache: true
           run-install: false
 
       # Runs cfn-lint for `bun run lint:template`.
-      - uses: astral-sh/setup-uv@v10.2.0
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
 
       - run: bun install --frozen-lockfile
       - run: bun run check
