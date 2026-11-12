@@ -216,10 +216,23 @@ Resources:
           - Effect: Allow
             Principal: { Service: ec2.amazonaws.com }
             Action: sts:AssumeRole
-      ManagedPolicyArns:
-        # Allows shell access through Session Manager for debugging a stuck runner.
-        - !Sub arn:${AWS::Partition}:iam::aws:policy/AmazonSSMManagedInstanceCore
       Policies:
+        # Shell access through Session Manager for debugging a stuck runner:
+        # the minimal Session Manager permissions from the Systems Manager
+        # user guide. AmazonSSMManagedInstanceCore would also let every job
+        # read every Parameter Store parameter in the account.
+        - PolicyName: session-manager
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ssm:UpdateInstanceInformation
+                  - ssmmessages:CreateControlChannel
+                  - ssmmessages:CreateDataChannel
+                  - ssmmessages:OpenControlChannel
+                  - ssmmessages:OpenDataChannel
+                Resource: "*"
         - PolicyName: cache-bucket
           PolicyDocument:
             Version: "2012-10-17"
