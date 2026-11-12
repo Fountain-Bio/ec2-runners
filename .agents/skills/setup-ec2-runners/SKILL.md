@@ -45,7 +45,7 @@ Run each check and record its result:
 AWS_REGION=$REGION STACK=$STACK ./deploy.sh GitHubOrg=$ORG AlertEmail=<email>
 ```
 
-Leave out `AlertEmail` when the person gave none, and leave out `GitHubOrg` on an update unless it changes. Pass any other parameters the person asked for (`docs/setup.md`, Parameters). A first deploy takes several minutes.
+Leave out `AlertEmail` when the person gave none, and leave out `GitHubOrg` on an update unless it changes. Pass any other parameters the person asked for (`docs/setup.md`, Parameters). A first deploy takes several minutes. The janitor and reconciler alarms fire until step 4 installs the GitHub App; tell the person to expect those alerts.
 
 **Done when** `aws cloudformation describe-stacks --region $REGION --stack-name $STACK --query 'Stacks[0].StackStatus'` prints `CREATE_COMPLETE` or `UPDATE_COMPLETE`, and the outputs include `WebhookUrl` and `GitHubAppSecretArn`.
 

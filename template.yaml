@@ -854,5 +854,5 @@ Outputs:
     Description: S3 bucket used by runs-on/cache and the BuildKit layer cache.
     Value: !Ref CacheBucket
   AlertTopicArn:
-    Description: SNS topic for the stack's alerts and alarms. See the README's Alerts section.
+    Description: SNS topic for the stack's alerts and alarms. docs/operations.md lists them.
     Value: !Ref AlertTopic

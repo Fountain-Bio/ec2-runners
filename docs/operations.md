@@ -10,7 +10,7 @@ The `<stack>-alerts` SNS topic receives these alerts. [Setup](setup.md#5-route-a
 
 | Alert | Meaning | Action |
 | --- | --- | --- |
-| A job's labels can never launch | The job asks for something no instance type or image provides, such as `cpu=3`, an unknown `image=`, both `ec2` and `microvm`, or EC2 labels on a `microvm` job. Sent once per job. | Fix the workflow's `runs-on`. The job stays queued until it is cancelled or GitHub's 24-hour queue limit ends it. |
+| A job's labels can never launch | The job asks for something no instance type or image provides, such as `cpu=3` or an unknown `image=`. The reconciler sends "Runner labels cannot launch" once per job. Labels the webhook rejects outright, such as both `ec2` and `microvm`, EC2 labels on a `microvm` job, or `cpu=abc`, first send "Invalid runner labels", and the scheduled backfill later sends "Runner labels cannot launch" for the same job. | Fix the workflow's `runs-on`. The job stays queued until it is cancelled or GitHub's 24-hour queue limit ends it. |
 | A job has failed to launch ten times | EC2 kept refusing the launch, for example for lack of Spot capacity or vCPU quota. Ten failures take about 5 minutes. | Read the error in the alert. For quota errors, raise the vCPU quota ([Setup](setup.md#account-quotas)). For capacity errors, widen `family=` or drop it, or use `spot=false`. |
 | A job's runners keep going unused | Two runners launched for the job sat idle until the janitor terminated them while the job stayed queued, so GitHub is not assigning the job to them. The reconciler stops launching for that job. | Usually the runner group does not allow the job's repository. Check the group's repository access in organization settings under **Actions → Runner groups**. |
 | The runner group allows public repositories | The group's **Allow public repositories** setting is on while `AllowPublicRepos` is false. No runners launch until one of the two changes. | Turn the group setting off, or deploy with `AllowPublicRepos=true`. |
@@ -28,7 +28,7 @@ The reconciler alarm ignores a single failure: Lambda retries the invocation, an
 
 | Log group | Contents |
 | --- | --- |
-| `/aws/lambda/<stack>-webhook` | Each delivery the webhook accepted or rejected. |
+| `/aws/lambda/<stack>-webhook` | Queued jobs it passed to the reconciler (`invoked reconciler`), deliveries with invalid signatures, jobs from public repositories it ignored, and jobs with invalid labels. Other deliveries leave no line. |
 | `/aws/lambda/<stack>-reconciler` | Each reconcile: jobs recorded from the backfill, the matching, launches and their errors, runners retired. Failed GitHub requests appear as `GitHub request failed` and rate limits as `GitHub rate limit`. |
 | `/aws/lambda/<stack>-janitor` | Instances and MicroVMs terminated, registrations removed, MicroVM image builds. |
 | `/ec2-runners/<stack>/boot` | Each EC2 runner's boot log, in a stream named after the runner, copied when the boot script exits or the instance is terminated. |

@@ -23,6 +23,8 @@ The stack registers runners at the organization level, so it serves one GitHub o
 
 The stack prints four outputs: `WebhookUrl`, `GitHubAppSecretArn`, `CacheBucket`, and `AlertTopicArn`. With `AlertEmail` set, SNS emails a subscription confirmation that must be accepted before alerts arrive.
 
+Until the GitHub App exists and is installed (steps 2 and 3), the janitor and the scheduled reconcile fail on every run, so the `<stack>-janitor-errors` alarm fires within about 5 minutes and `<stack>-reconciler-errors` within about 15. Both clear once the app is installed.
+
 The default runner images are the public `runs-on-v2.2-*` AMIs published by [RunsOn](https://runs-on.com) in us-east-1, us-east-2, us-west-2, eu-west-1, eu-west-2, eu-west-3, eu-central-1, ap-south-1, ap-northeast-1, ap-southeast-1, and ap-southeast-2. In another region, build your own AMIs and set `AmiOwner` and `AmiNamePrefix`.
 
 ## 2. Create the GitHub App
@@ -75,7 +77,8 @@ The `<stack>-alerts` SNS topic receives every alert. [Operations](operations.md#
 To send alerts to Slack or Microsoft Teams, use [Amazon Q Developer in chat applications](https://docs.aws.amazon.com/chatbot/latest/adminguide/what-is.html) (formerly AWS Chatbot). Alerts are published in its custom notification format, so they render as formatted messages. Create a channel configuration for the chat channel in that service's console, then add the stack's topic to it:
 
 ```bash
-TOPIC=$(aws cloudformation describe-stacks --stack-name ec2-runners \
+STACK=ec2-runners REGION=us-west-2   # as used for deploy.sh
+TOPIC=$(aws cloudformation describe-stacks --region "$REGION" --stack-name "$STACK" \
   --query "Stacks[0].Outputs[?OutputKey=='AlertTopicArn'].OutputValue" --output text)
 aws chatbot update-slack-channel-configuration --region us-east-2 \
   --chat-configuration-arn "<channel configuration ARN>" \
