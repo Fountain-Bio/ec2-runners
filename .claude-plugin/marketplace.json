@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-marketplace.json",
+  "name": "ec2-runners",
+  "description": "Agent skills for deploying, operating, and adopting ec2-runners: ephemeral GitHub Actions runners on EC2 Spot and AWS Lambda MicroVMs.",
+  "owner": { "name": "Fountain Biologics, Inc" },
+  "plugins": [
+    {
+      "name": "ec2-runners",
+      "source": "./",
+      "description": "Skills to set up the ec2-runners stack in an AWS account, debug jobs that wait for a runner, and move a repository's workflows onto the runners."
+    }
+  ]
+}

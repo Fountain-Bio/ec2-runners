@@ -5,7 +5,7 @@ description: Diagnoses a deployed ec2-runners stack. Use when a job waits for an
 
 # Debug ec2-runners
 
-The goal is a **root cause backed by evidence**: a log line, an API response, or a table row that explains the symptom. `docs/operations.md` describes every alert and log group, and `docs/architecture.md` describes how a job becomes a runner.
+The goal is a **root cause backed by evidence**: a log line, an API response, or a table row that explains the symptom. The ec2-runners repository is three directories above this file (in Claude Code, `${CLAUDE_SKILL_DIR}/../../..`); its `docs/operations.md` describes every alert and log group, and `docs/architecture.md` describes how a job becomes a runner.
 
 ## 1. Pin down the deployment and the symptom
 
@@ -20,7 +20,7 @@ Get the symptom as one of:
 
 ## 2. An alert
 
-Find the alert's row in the Alerts table in `docs/operations.md`, and carry out its action. Alerts about a job name the repository and job; continue with step 3 for that job when the alert's action does not resolve it.
+Find the alert's row in the Alerts table in the repository's `docs/operations.md`, and carry out its action. Alerts about a job name the repository and job; continue with step 3 for that job when the alert's action does not resolve it.
 
 **Done when** the alert's action is done or the cause is identified.
 

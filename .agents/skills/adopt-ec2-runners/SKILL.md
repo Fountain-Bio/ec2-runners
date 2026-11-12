@@ -5,7 +5,7 @@ description: Moves a repository's GitHub Actions jobs onto ec2-runners by choosi
 
 # Adopt ec2-runners in a repository
 
-Run this in the repository whose workflows should move. The organization must already have the stack deployed and the GitHub App installed on this repository. `docs/usage.md` in the ec2-runners repository is the reference for every label and for the cache and Docker settings.
+Run this in the repository whose workflows should move. The organization must already have the stack deployed and the GitHub App installed on this repository. The ec2-runners repository is three directories above this file (in Claude Code, `${CLAUDE_SKILL_DIR}/../../..`); its `docs/usage.md` is the reference for every label and for the cache and Docker settings, and its `docs/benchmarks.md` has the measured start times and costs.
 
 ## 1. Inventory
 
@@ -19,7 +19,7 @@ Confirm the repository is private (`gh repo view --json isPrivate`). The stack i
 
 Give each job one of these classes, with a one-line reason:
 
-- **microvm**: runs in about 2 minutes or less, and needs no Docker, no AWS credentials, no `runs-on/cache`, and nothing x86-only (a MicroVM is ARM64 Amazon Linux). Path filters, status gates, labelers, and review bots usually fit. `runs-on: microvm`. A MicroVM job starts about 10 seconds later than on a GitHub-hosted runner and costs about the same (`docs/benchmarks.md` in the ec2-runners repository), so move such a job only when the person wants it off GitHub-hosted runners, for example because the plan's included minutes run out.
+- **microvm**: runs in about 2 minutes or less, and needs no Docker, no AWS credentials, no `runs-on/cache`, and nothing x86-only (a MicroVM is ARM64 Amazon Linux). Path filters, status gates, labelers, and review bots usually fit. `runs-on: microvm`. A MicroVM job starts about 10 seconds later than on a GitHub-hosted runner and costs about the same (`docs/benchmarks.md`), so move such a job only when the person wants it off GitHub-hosted runners, for example because the plan's included minutes run out.
 - **ec2**: everything else on Linux. Size it with `cpu=` and, when memory matters, `ram=`. A job on `ubuntu-latest` in a private repository had 2 vCPUs, so `cpu=2` keeps its speed and `cpu=4` or `cpu=8` buys parallelism for builds and test suites. Add `nvme=true` for Docker builds and jobs heavy on disk. Add `spot=false` for jobs that must not be interrupted, such as deploys and releases.
 - **stay**: macOS, Windows, GPU, jobs in public repositories, jobs that use GitHub-hosted features the stack lacks, and short jobs the person prefers to keep on GitHub-hosted runners. Keep their current `runs-on`.
 

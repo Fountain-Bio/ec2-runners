@@ -21,6 +21,7 @@ Reconcile passes never overlap. The lock is one item in the jobs table (`jobId` 
 - Job-label problems that can never launch throw `JobConfigError`; anything else counts as a retryable launch failure.
 - `test/handlers.test.ts` stubs AWS clients through their prototypes' `send`, GitHub through `fetch`, and the jobs table with an in-memory fake that interprets the store's update expressions. The integration tests run the real expressions against DynamoDB Local, so a change to an expression in `jobs.ts` updates the fake and runs `test:integration`.
 - Behaviour, labels, parameters, and alerts are documented in `docs/`. A change to any of them updates the matching page in the same commit.
+- `.agents/skills/` ships three ways: to agents in a clone, to Claude Code through the `.claude/skills` links, and as the `ec2-runners` plugin listed in `.claude-plugin/marketplace.json`, whose root is the repository root. A skill refers to repository files by their path from the repository root, three directories above the skill's folder, and runs `claude plugin validate .` after a change.
 
 ## Resources outside the template
 

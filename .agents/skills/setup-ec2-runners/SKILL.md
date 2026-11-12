@@ -5,7 +5,7 @@ description: Deploys the ec2-runners stack to an AWS account and connects it to 
 
 # Set up ec2-runners
 
-Work from the root of this repository. `docs/setup.md` is the reference for every step; this skill adds the checks that prove each step worked. Ask the person before any step that spends money or changes their GitHub organization, and say which account and organization it touches.
+Work from an **ec2-runners checkout**: a clone of https://github.com/Fountain-Bio/ec2-runners that the person keeps, because later updates are deployed from it with the same stack name. If the current project is such a checkout, use it. Otherwise, as when this skill came from the Claude Code plugin, ask where to clone it, run `git clone https://github.com/Fountain-Bio/ec2-runners <directory>`, and work in that directory. Every path below is relative to the checkout. `docs/setup.md` is the reference for every step; this skill adds the checks that prove each step worked. Ask the person before any step that spends money or changes their GitHub organization, and say which account and organization it touches.
 
 Throughout, `$STACK`, `$REGION`, and `$ORG` are the stack name, AWS region, and GitHub organization from step 1, and every AWS command runs with the person's chosen `AWS_PROFILE`.
 
@@ -20,7 +20,7 @@ Collect:
 
 Run `aws sts get-caller-identity` and `gh api user --jq .login`. Check that `gh api user/memberships/orgs/$ORG --jq .role` prints `admin`, which step 4 and the runner group check need. The runner group API also needs the `admin:org` scope: when `gh auth status` does not list it, ask the person to run `gh auth refresh -h github.com -s admin:org`, which opens a browser. Check `node --version` is 24 or later and `bun --version` succeeds.
 
-**Done when** every input has a value, the tools run, and the person has confirmed the AWS account ID and the organization by name.
+**Done when** you are in an ec2-runners checkout, every input has a value, the tools run, and the person has confirmed the AWS account ID and the organization by name.
 
 ## 2. Preflight
 

@@ -60,6 +60,15 @@ Coding agents can run the setup with the `setup-ec2-runners` skill in [`.agents/
 | [`debug-ec2-runners`](.agents/skills/debug-ec2-runners/SKILL.md) | Find out why a job is still queued, a runner failed, or an alert fired. |
 | [`adopt-ec2-runners`](.agents/skills/adopt-ec2-runners/SKILL.md) | Move a repository's workflow jobs onto `ec2` and `microvm` runners. |
 
+Agents working in a clone of this repository load the skills from `.agents/skills` (Codex and other Agent Skills hosts) or `.claude/skills` (Claude Code). To use them from any project in Claude Code, install the plugin from this repository's marketplace:
+
+```
+/plugin marketplace add Fountain-Bio/ec2-runners
+/plugin install ec2-runners@ec2-runners
+```
+
+The skills then run as `/ec2-runners:setup-ec2-runners`, `/ec2-runners:debug-ec2-runners`, and `/ec2-runners:adopt-ec2-runners`. The setup skill clones this repository to deploy from, since later updates are deployed from the same checkout.
+
 ## License
 
 [MIT](LICENSE)

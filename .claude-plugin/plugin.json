@@ -1,0 +1,10 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-plugin-manifest.json",
+  "name": "ec2-runners",
+  "description": "Skills to set up the ec2-runners stack in an AWS account, debug jobs that wait for a runner, and move a repository's workflows onto the runners.",
+  "author": { "name": "Fountain Biologics, Inc" },
+  "repository": "https://github.com/Fountain-Bio/ec2-runners",
+  "license": "MIT",
+  "keywords": ["github-actions", "self-hosted-runners", "aws", "ec2", "spot", "lambda-microvms"],
+  "skills": ["./.agents/skills/"]
+}
