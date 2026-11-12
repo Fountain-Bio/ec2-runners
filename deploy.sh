@@ -1,10 +1,13 @@
 #!/usr/bin/env bash
 # Bundles the Lambda code and deploys the stack. Needs bun, Node.js 24, and the AWS CLI.
 #
-#   ./deploy.sh                      # stack "ec2-runners" in us-west-2, or AWS_REGION when set
-#   STACK=ci-runners ./deploy.sh GitHubOrg=example-org IdleMinutes=15
+#   ./deploy.sh GitHubOrg=my-org     # first deploy: stack "ec2-runners" in us-west-2, or AWS_REGION when set
+#   ./deploy.sh                      # later deploys keep the stack's current parameter values
+#   STACK=ci-runners ./deploy.sh GitHubOrg=my-org IdleMinutes=15
 #
-# Extra arguments are passed as parameter overrides.
+# Extra arguments are passed as parameter overrides. A parameter left out keeps
+# its current value on an existing stack, and its template default on a new one.
+# GitHubOrg has no default, so the first deploy must set it.
 set -euo pipefail
 cd "$(dirname "$0")"
 

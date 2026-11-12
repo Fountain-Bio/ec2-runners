@@ -9,8 +9,10 @@ Description: >-
 Parameters:
   GitHubOrg:
     Type: String
-    Description: GitHub organization the GitHub App is installed on.
-    Default: example-org
+    Description: >-
+      GitHub organization the GitHub App is installed on, as it appears in
+      github.com/<org>. Webhooks from other organizations are ignored.
+    MinLength: 1
   TriggerLabel:
     Type: String
     Description: Jobs whose runs-on labels include this label get an EC2 runner.

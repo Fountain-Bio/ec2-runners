@@ -11,7 +11,7 @@
 # The build needs a docker-container builder, which docker/setup-buildx-action
 # creates; the default docker driver cannot export cache.
 name: Docker layer cache
-description: cache-from and cache-to values for a BuildKit image build on the example-org runners.
+description: cache-from and cache-to values that keep a BuildKit image build's layer cache in the ec2-runners S3 cache bucket.
 
 inputs:
   name:
