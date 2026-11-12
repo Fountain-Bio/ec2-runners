@@ -18,7 +18,10 @@ REGION="${AWS_REGION:-us-west-2}"
 ACCOUNT="$(aws sts get-caller-identity --query Account --output text)"
 ARTIFACTS="${ARTIFACTS_BUCKET:-${STACK}-artifacts-${ACCOUNT}-${REGION}}"
 
-if ! aws s3api head-bucket --bucket "$ARTIFACTS" 2>/dev/null; then
+# The bucket name is predictable, so someone else could create it first and
+# receive the Lambda code. --expected-bucket-owner fails for a bucket that
+# exists in another account; creating it then fails too, which stops the deploy.
+if ! aws s3api head-bucket --bucket "$ARTIFACTS" --expected-bucket-owner "$ACCOUNT" 2>/dev/null; then
   echo "Creating artifact bucket $ARTIFACTS"
   if [ "$REGION" = "us-east-1" ]; then
     aws s3api create-bucket --bucket "$ARTIFACTS" --region "$REGION" >/dev/null
