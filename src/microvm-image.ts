@@ -6,8 +6,8 @@
 // is a new image version, and RunMicrovm starts the latest active one.
 //
 // The janitor keeps the image current (ensureMicrovmImage). It builds the
-// image when it is missing, and rebuilds it when the actions/runner, gh, or
-// Node.js LTS release, the image source, or the memory size changes, and when the active version is
+// image when it is missing, and rebuilds it when the actions/runner, gh,
+// Node.js LTS, or Bun release, the image source, or the memory size changes, and when the active version is
 // 30 days old, which picks up new Lambda base image versions before Lambda
 // expires the old ones. A build takes about three minutes. Until the first
 // build finishes, MicroVM launches fail and the reconciler launches EC2
@@ -49,11 +49,11 @@ const JANITOR_PERIOD_MS = 5 * 60_000;
 // The base container ships openssl-snapsafe-libs, an OpenSSL build that stays
 // safe when many MicroVMs start from one memory snapshot, and it conflicts
 // with the stock openssl-libs, so the runner's dependency list leaves OpenSSL
-// out. oven-sh/setup-bun extracts Bun with unzip, and the Node.js builds that
-// actions/setup-node installs link against libatomic. gh comes from its release
+// out. The Node.js builds that actions/setup-node installs link against
+// libatomic. gh comes from its release
 // tarball, checked like the runner's: Amazon Linux 2023's crypto policy
 // rejects the signatures on GitHub's gh packages.
-function dockerfile(runner: ReleaseDownload, ghCli: ReleaseDownload, node: ReleaseDownload): string {
+function dockerfile({ runner, ghCli, node, bun }: ImageReleases): string {
   return `FROM public.ecr.aws/lambda/microvms:al2023-minimal
 
 RUN dnf install -y --setopt=install_weak_deps=0 \\
@@ -88,6 +88,18 @@ RUN mkdir -p /home/runner/work/_tool/node/${node.version}/arm64 \\
     && rm /tmp/node.tgz \\
     && chown -R runner:runner /home/runner/work
 
+# Bun at ~/.bun/bin/bun, where oven-sh/setup-bun installs it. setup-bun 2.1.0
+# and later use a Bun already there when its version is the one the job asks
+# for, and then skip the GitHub cache download, which on a MicroVM sometimes
+# stalls for up to a minute. A job that asks for another version, or runs an
+# older setup-bun, still downloads Bun as usual.
+RUN curl -fsSL -o /tmp/bun.zip ${bun.url} \\
+    && echo "${bun.sha256}  /tmp/bun.zip" | sha256sum -c - \\
+    && unzip -q /tmp/bun.zip -d /tmp/bun \\
+    && install -D -m 0755 /tmp/bun/bun-linux-aarch64/bun /home/runner/.bun/bin/bun \\
+    && rm -rf /tmp/bun /tmp/bun.zip \\
+    && chown -R runner:runner /home/runner/.bun
+
 COPY hooks.py /opt/microvm-runner/hooks.py
 CMD ["python3", "-u", "/opt/microvm-runner/hooks.py"]
 `;
@@ -96,8 +108,9 @@ CMD ["python3", "-u", "/opt/microvm-runner/hooks.py"]
 // The container's main process: a server for Lambda's lifecycle hooks, which
 // Lambda POSTs to /aws/lambda-microvms/runtime/v1/<hook> on HOOK_PORT.
 //   ready, validate  Image build. Runs the runner binary, the Node.js builds
-//                    the runner runs JavaScript actions on, git, and the cached
-//                    Node.js and npm the way actions/setup-node does, once each,
+//                    the runner runs JavaScript actions on, git, the cached
+//                    Node.js and npm the way actions/setup-node does, and Bun
+//                    the way oven-sh/setup-bun checks its version, once each,
 //                    so the snapshot holds their files in the page cache. A
 //                    MicroVM reads files outside the page cache from its
 //                    snapshot disk on first use: starting actions/checkout took
@@ -134,6 +147,7 @@ def warm():
     log("warmed runner", rc=out.returncode, version=out.stdout.strip())
     commands = [[node, "-e", "0"] for node in glob.glob(f"{RUNNER_DIR}/externals/node*/bin/node")]
     commands.append(["git", "--version"])
+    commands.append(["/home/runner/.bun/bin/bun", "--revision"])
     for bin_dir in glob.glob("/home/runner/work/_tool/node/*/arm64/bin"):
         commands += [["env", f"PATH={bin_dir}:/usr/bin:/bin", tool, "--version"] for tool in ("node", "npm")]
     for command in commands:
@@ -177,10 +191,10 @@ if __name__ == "__main__":
     ThreadingHTTPServer(("0.0.0.0", ${HOOK_PORT}), Hooks).serve_forever()
 `;
 
-// The image's source files for a runner, gh, and Node.js release, and a
+// The image's source files for a runner, gh, Node.js, and Bun release, and a
 // fingerprint of them together with the memory size, which names the build inputs.
 export function imageSource(releases: ImageReleases, memoryMiB: number): { files: Record<string, string>; fingerprint: string } {
-  const files = { Dockerfile: dockerfile(releases.runner, releases.ghCli, releases.node), "hooks.py": HOOKS_PY };
+  const files = { Dockerfile: dockerfile(releases), "hooks.py": HOOKS_PY };
   const hash = createHash("sha256").update(JSON.stringify({ files, memoryMiB }));
   return { files, fingerprint: hash.digest("hex").slice(0, 16) };
 }
@@ -232,12 +246,13 @@ export function zipFiles(files: Record<string, string>): Buffer {
   return Buffer.concat([...locals, directory, end]);
 }
 
-// The releases the image holds: the actions runner, the gh CLI, and the
-// Node.js release in the tool cache.
+// The releases the image holds: the actions runner, the gh CLI, the Node.js
+// release in the tool cache, and Bun.
 export interface ImageReleases {
   runner: ReleaseDownload;
   ghCli: ReleaseDownload;
   node: ReleaseDownload;
+  bun: ReleaseDownload;
 }
 
 export interface ImageSettings {
@@ -257,11 +272,11 @@ export interface ImageSettings {
 
 export type ImageStatus = "current" | "building" | "build started" | "build failed";
 
-// The description each version is built with. It names the runner, gh, and
-// Node.js releases and the fingerprint of the build inputs, so the janitor can
+// The description each version is built with. It names the runner, gh,
+// Node.js, and Bun releases and the fingerprint of the build inputs, so the janitor can
 // tell whether the active version matches what it would build now.
-const describeBuild = ({ runner, ghCli, node }: ImageReleases, fingerprint: string) =>
-  `runner ${runner.version}, gh ${ghCli.version}, node ${node.version}, source ${fingerprint}`;
+const describeBuild = ({ runner, ghCli, node, bun }: ImageReleases, fingerprint: string) =>
+  `runner ${runner.version}, gh ${ghCli.version}, node ${node.version}, bun ${bun.version}, source ${fingerprint}`;
 
 // Builds or rebuilds the image when needed (see the top of this file), and
 // deletes versions no MicroVM can still use. Returns what it found or did, and

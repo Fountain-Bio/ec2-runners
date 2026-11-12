@@ -38,7 +38,8 @@ export function isGitHubError(err: unknown, status: number): boolean {
   return err instanceof RequestError && err.status === status;
 }
 
-// A release tarball (actions/runner, or the gh CLI) and its SHA-256 checksum.
+// A release download (the actions/runner, gh CLI, Node.js, or Bun archive) and
+// its SHA-256 checksum.
 export interface ReleaseDownload {
   version: string;
   url: string;
@@ -257,6 +258,19 @@ export class GitHubClient {
     const asset = release.assets.find((a) => a.name === filename);
     const sha256 = asset?.digest?.match(/^sha256:([0-9a-f]{64})$/)?.[1];
     if (!asset || !sha256) throw new Error(`cli/cli ${release.tag_name} has no ${filename} with a sha256 digest`);
+    return { version, url: asset.browser_download_url, sha256 };
+  }
+
+  // Looks up the latest Bun release zip for Linux (glibc) on ARM64 and its
+  // checksum, for the MicroVM image. Bun tags its releases "bun-v1.4.4".
+  async bunDownload(): Promise<ReleaseDownload> {
+    const gh = await this.octokit();
+    const { data: release } = await gh.rest.repos.getLatestRelease({ owner: "oven-sh", repo: "bun" });
+    const version = release.tag_name.replace(/^bun-v/, "");
+    const filename = "bun-linux-aarch64.zip";
+    const asset = release.assets.find((a) => a.name === filename);
+    const sha256 = asset?.digest?.match(/^sha256:([0-9a-f]{64})$/)?.[1];
+    if (!asset || !sha256) throw new Error(`oven-sh/bun ${release.tag_name} has no ${filename} with a sha256 digest`);
     return { version, url: asset.browser_download_url, sha256 };
   }
 }

@@ -127,6 +127,7 @@ async function keepMicrovmImageCurrent(config: JanitorConfig, gh: GitHubClient):
         runner: await gh.runnerDownload(config.RUNNER_VERSION, "arm64"),
         ghCli: await gh.ghCliDownload(),
         node: await nodeDownload(),
+        bun: await gh.bunDownload(),
       },
       maxMinutes: config.MAX_MINUTES,
     });
@@ -136,7 +137,7 @@ async function keepMicrovmImageCurrent(config: JanitorConfig, gh: GitHubClient):
         "MicroVM image build failed",
         `Version ${result.failure.version} of MicroVM image ${config.MICROVM_IMAGE_NAME} failed to build: ${result.failure.reason}\n\n` +
           `Jobs labelled for MicroVMs run on EC2 runners until a build succeeds. The build log is in /aws/lambda-microvms/${config.MICROVM_IMAGE_NAME}. ` +
-          `The janitor retries the build in 6 hours, or sooner when the runner, gh, or Node.js release or the image source changes.`,
+          `The janitor retries the build in 6 hours, or sooner when the runner, gh, Node.js, or Bun release or the image source changes.`,
       );
     }
     return result.status;

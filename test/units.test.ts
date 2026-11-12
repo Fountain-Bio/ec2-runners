@@ -457,7 +457,12 @@ const NODE = {
   url: "https://nodejs.org/dist/v26.13.1/node-v26.13.1-linux-arm64.tar.gz",
   sha256: "d".repeat(64),
 };
-const RELEASES = { runner: RUNNER, ghCli: GH_CLI, node: NODE };
+const BUN = {
+  version: "1.4.4",
+  url: "https://github.com/oven-sh/bun/releases/download/bun-v1.4.4/bun-linux-aarch64.zip",
+  sha256: "f".repeat(64),
+};
+const RELEASES = { runner: RUNNER, ghCli: GH_CLI, node: NODE, bun: BUN };
 
 test("zipFiles writes an archive that a standard zip reader extracts", () => {
   const { files } = imageSource(RELEASES, 2048);
@@ -474,9 +479,11 @@ test("zipFiles writes an archive that a standard zip reader extracts", () => {
   expect(files.Dockerfile).toContain(`echo "${GH_CLI.sha256}  /tmp/gh.tgz" | sha256sum -c -`);
   expect(files.Dockerfile).toContain(`echo "${NODE.sha256}  /tmp/node.tgz" | sha256sum -c -`);
   expect(files.Dockerfile).toContain("touch /home/runner/work/_tool/node/26.13.1/arm64.complete");
+  expect(files.Dockerfile).toContain(`echo "${BUN.sha256}  /tmp/bun.zip" | sha256sum -c -`);
+  expect(files.Dockerfile).toContain("/home/runner/.bun/bin/bun");
 });
 
-test("imageSource fingerprints change with the runner, gh, and Node.js releases and the memory size", () => {
+test("imageSource fingerprints change with the runner, gh, Node.js, and Bun releases and the memory size", () => {
   const base = imageSource(RELEASES, 2048).fingerprint;
   expect(imageSource(RELEASES, 2048).fingerprint).toBe(base);
   const next = { version: "2.339.0", url: RUNNER.url.replaceAll("2.338.2", "2.339.0"), sha256: "b".repeat(64) };
@@ -485,6 +492,7 @@ test("imageSource fingerprints change with the runner, gh, and Node.js releases 
   const nextNode = { version: "26.13.2", url: NODE.url.replaceAll("26.13.1", "26.13.2"), sha256: "e".repeat(64) };
   expect(imageSource({ ...RELEASES, node: nextNode }, 2048).fingerprint).not.toBe(base);
   expect(imageSource({ ...RELEASES, ghCli: { ...GH_CLI, url: GH_CLI.url.replaceAll("2.103.3", "2.104.0") } }, 2048).fingerprint).not.toBe(base);
+  expect(imageSource({ ...RELEASES, bun: { ...BUN, url: BUN.url.replaceAll("1.4.4", "1.4.5") } }, 2048).fingerprint).not.toBe(base);
 });
 
 // A fake Lambda MicroVMs client holding one image and its versions.
@@ -524,7 +532,7 @@ const settings: ImageSettings = {
   maxMinutes: 360,
 };
 const ARN = "arn:aws:lambda:us-west-2:1:microvm-image:ec2-runners-runner";
-const currentDescription = `runner 2.338.2, gh 2.103.3, node 26.13.1, source ${imageSource(RELEASES, 2048).fingerprint}`;
+const currentDescription = `runner 2.338.2, gh 2.103.3, node 26.13.1, bun 1.4.4, source ${imageSource(RELEASES, 2048).fingerprint}`;
 const hoursAgo = (h: number) => new Date(Date.now() - h * 3600_000);
 
 test("ensureMicrovmImage creates the image when it is missing", async () => {

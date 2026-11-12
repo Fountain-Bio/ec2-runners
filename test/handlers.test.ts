@@ -229,6 +229,18 @@ const baseRoutes = (): Record<string, Route> => ({
       ],
     },
   },
+  "GET /repos/oven-sh/bun/releases/latest": {
+    body: {
+      tag_name: "bun-v1.4.4",
+      assets: [
+        {
+          name: "bun-linux-aarch64.zip",
+          browser_download_url: "https://github.com/oven-sh/bun/releases/download/bun-v1.4.4/bun-linux-aarch64.zip",
+          digest: `sha256:${RUNNER_SHA256}`,
+        },
+      ],
+    },
+  },
   "GET /dist/index.json": { body: [{ version: "v26.13.1", lts: "Lithium" }] },
   "GET /dist/v26.13.1/SHASUMS256.txt": { body: `${RUNNER_SHA256}  node-v26.13.1-linux-arm64.tar.gz\n` },
   "GET /orgs/example-org/actions/runners": { body: { total_count: 0, runners: [] } },
