@@ -1,5 +1,5 @@
 import { expect, test } from "vite-plus/test";
-import { appManifest, appSecretString, isPlaceholderSecret, manifestPage } from "../scripts/github-app.ts";
+import { appManifest, appSecretString, assertOwnedBy, isPlaceholderSecret, manifestPage } from "../scripts/github-app.ts";
 
 const manifest = appManifest({
   org: "example-org",
@@ -34,7 +34,7 @@ test("the manifest page posts the escaped manifest to the organization's new-app
 });
 
 test("the secret has the shape src/app-secret.ts parses", () => {
-  const secret = appSecretString({ id: 42, slug: "s", html_url: "u", pem: "-----BEGIN-----", webhook_secret: "w" });
+  const secret = appSecretString({ id: 42, slug: "s", html_url: "u", owner: null, pem: "-----BEGIN-----", webhook_secret: "w" });
   expect(JSON.parse(secret)).toEqual({ appId: "42", privateKey: "-----BEGIN-----", webhookSecret: "w" });
 });
 
@@ -44,4 +44,11 @@ test("only an empty or placeholder secret counts as safe to overwrite", () => {
   expect(isPlaceholderSecret('{"appId":"123","privateKey":"k","webhookSecret":"w"}')).toBe(false);
   expect(isPlaceholderSecret('{"appId":123}')).toBe(false);
   expect(isPlaceholderSecret("not json")).toBe(false);
+});
+
+test("only an app owned by the organization passes the owner check", () => {
+  const app = { id: 1, slug: "s", html_url: "u", pem: "k", webhook_secret: "w" };
+  expect(() => assertOwnedBy({ ...app, owner: { login: "Example-Org" } }, "example-org")).not.toThrow();
+  expect(() => assertOwnedBy({ ...app, owner: { login: "someone-else" } }, "example-org")).toThrow(/belongs to someone-else, not example-org/);
+  expect(() => assertOwnedBy({ ...app, owner: null }, "example-org")).toThrow(/unknown account/);
 });

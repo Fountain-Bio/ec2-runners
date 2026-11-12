@@ -22,7 +22,7 @@ import { randomBytes } from "node:crypto";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import { parseArgs } from "node:util";
-import { appManifest, appSecretString, isPlaceholderSecret, manifestPage, type ManifestConversion } from "./github-app.ts";
+import { appManifest, appSecretString, assertOwnedBy, escapeHtml, isPlaceholderSecret, manifestPage, type ManifestConversion } from "./github-app.ts";
 
 // GitHub's codes expire after an hour, so waiting longer cannot succeed.
 const TIMEOUT_MS = 60 * 60 * 1000;
@@ -100,9 +100,17 @@ let finished = false;
 const server = createServer((req, res) => {
   const url = new URL(req.url ?? "/", "http://127.0.0.1");
   const html = (status: number, body: string) => res.writeHead(status, { "content-type": "text/html; charset=utf-8" }).end(body);
+  const { port } = server.address() as AddressInfo;
+
+  // A web page that rebinds its own hostname to 127.0.0.1 can reach this
+  // server, but its requests carry that hostname, so only requests addressed
+  // to 127.0.0.1 itself are served.
+  if (req.headers.host !== `127.0.0.1:${port}`) {
+    html(421, "Misdirected request");
+    return;
+  }
 
   if (url.pathname === "/") {
-    const { port } = server.address() as AddressInfo;
     const manifest = appManifest({ org, stack, webhookUrl, redirectUrl: `http://127.0.0.1:${port}/callback` });
     html(200, manifestPage(org, state, manifest));
     return;
@@ -121,14 +129,16 @@ const server = createServer((req, res) => {
   void (async () => {
     try {
       const app = await exchangeCode(code);
+      assertOwnedBy(app, org);
       await secrets.send(new PutSecretValueCommand({ SecretId: secretArn, SecretString: appSecretString(app) }));
       const installUrl = `${app.html_url}/installations/new`;
+      const [slugHtml, urlHtml, orgHtml] = [app.slug, installUrl, org].map(escapeHtml);
       console.log(`Created GitHub App ${app.slug} (ID ${app.id}) and stored its credentials in ${secretArn}.`);
       console.log(`Install it on ${org} for the repositories that should use the runners: ${installUrl}`);
       html(
         200,
-        `<!doctype html><title>GitHub App created</title><meta http-equiv="refresh" content="0;url=${installUrl}">` +
-          `<p>Stored the credentials for ${app.slug}. Next, <a href="${installUrl}">install the app</a> on ${org}.</p>`,
+        `<!doctype html><title>GitHub App created</title><meta http-equiv="refresh" content="0;url=${urlHtml}">` +
+          `<p>Stored the credentials for ${slugHtml}. Next, <a href="${urlHtml}">install the app</a> on ${orgHtml}.</p>`,
       );
     } catch (err) {
       console.error(err instanceof Error ? err.message : err);

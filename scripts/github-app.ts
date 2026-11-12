@@ -55,7 +55,7 @@ export function appManifest({
   };
 }
 
-function escapeHtml(s: string): string {
+export function escapeHtml(s: string): string {
   return s.replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
 }
 
@@ -80,8 +80,19 @@ export interface ManifestConversion {
   id: number;
   slug: string;
   html_url: string;
+  owner: { login: string } | null;
   pem: string;
   webhook_secret: string;
+}
+
+// Rejects an app that belongs to another account. A code for any app passes
+// the exchange, so without this check a process that reached the callback
+// with its own app's code could plant that app's credentials in the stack.
+export function assertOwnedBy(app: ManifestConversion, org: string): void {
+  const login = app.owner?.login ?? "";
+  if (login.toLowerCase() !== org.toLowerCase()) {
+    throw new Error(`GitHub App ${app.slug} belongs to ${login || "an unknown account"}, not ${org}. Its credentials were not stored.`);
+  }
 }
 
 // The JSON for the stack's GitHub App secret, in the shape src/app-secret.ts
