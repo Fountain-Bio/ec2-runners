@@ -1,5 +1,7 @@
-# Checks every push to main and every pull request, on this stack's own EC2
-# runners, so a passing run also shows the runners work end to end.
+# Checks every push to main and every pull request on GitHub-hosted runners.
+# The stack's own runners take jobs only from private repositories (see
+# AllowPublicRepos in template.yaml), so a public repository's CI cannot use
+# them.
 name: CI
 
 on:
@@ -7,28 +9,32 @@ on:
     branches: [main]
   pull_request:
 
+# Pull requests from forks run this workflow, so the token can only read.
+permissions:
+  contents: read
+
 jobs:
   check:
-    runs-on: [ec2, cpu=2]
+    runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7.0.1
 
-      # Runs the docker-cache action from this checkout on one of the stack's
-      # runners, where the job-started hook has set the cache variables, so a
-      # change that breaks the action fails here before another repository
-      # pins it.
+      # Runs the docker-cache action from this checkout. A GitHub-hosted runner
+      # has none of the cache variables the stack's boot script sets, so both
+      # outputs must be empty, which is what keeps a workflow that uses the
+      # action building on GitHub-hosted runners. test/docker-cache.test.ts
+      # covers the outputs on a stack runner.
       - id: docker-cache
         uses: ./actions/docker-cache
         with:
           name: ci
-      - name: Check the docker-cache outputs
+      - name: Check the docker-cache outputs are empty
         env:
           CACHE_FROM: ${{ steps.docker-cache.outputs.cache-from }}
           CACHE_TO: ${{ steps.docker-cache.outputs.cache-to }}
         run: |
-          [[ "$CACHE_FROM" == "type=s3,"*",prefix=buildkit/$GITHUB_REPOSITORY/,name=ci" ]]
-          [[ "$CACHE_TO" == "$CACHE_FROM,mode=max,ignore-error=true" ]]
+          [[ -z "$CACHE_FROM" && -z "$CACHE_TO" ]]
 
       # Installs vp and Node.js 24, the Lambda runtime's version. vp provides
       # bun at the version in package.json's packageManager field.

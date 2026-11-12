@@ -249,7 +249,7 @@ bun run build            # vp pack: writes .build/lambda; deploy.sh runs this
 bun run lint:template    # cfn-lint through uvx; needs uv
 ```
 
-`.github/workflows/ci.yml` runs the same checks on every push to `main` and every pull request, on this stack's own `ec2` runners. A passing run therefore also shows that the webhook, reconciler, and runners work. If the stack is down, CI waits for a runner until the stack is fixed and redeployed.
+`.github/workflows/ci.yml` runs the same checks on every push to `main` and every pull request, on GitHub-hosted runners.
 
 ## Removing it
 

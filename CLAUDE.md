@@ -5,7 +5,7 @@ Ephemeral GitHub Actions runners on EC2 Spot for the example-org org, deployed a
 ## Deploying
 
 - `AWS_PROFILE=dev ./deploy.sh` deploys to the development account in us-west-2. The stack runs only there; other accounts have no runner stack.
-- Before committing, run `bun run check`, `bun run test`, `bun run lint:template`, and, when `src/jobs.ts` or `src/lock.ts` changes, `bun run test:integration` (needs Docker). CI runs the same checks on this stack's own runners, so a broken deploy also shows up as CI waiting for a runner.
+- Before committing, run `bun run check`, `bun run test`, `bun run lint:template`, and, when `src/jobs.ts` or `src/lock.ts` changes, `bun run test:integration` (needs Docker). CI runs the same checks on GitHub-hosted runners.
 
 ## The runner pool
 
