@@ -1,5 +1,5 @@
 {
-  // Type-checks the Lambda source, the tests, and vite.config.ts through
+  // Type-checks the Lambda source, the scripts, the tests, and vite.config.ts through
   // `vp check`. Vite+ bundles and runs the .ts files directly, so TypeScript
   // never writes output.
   "compilerOptions": {
@@ -22,5 +22,5 @@
     "noUncheckedIndexedAccess": true,
     "noImplicitOverride": true
   },
-  "include": ["src", "test", "vite.config.ts"]
+  "include": ["src", "scripts", "test", "vite.config.ts"]
 }

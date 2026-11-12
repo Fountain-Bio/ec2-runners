@@ -61,4 +61,5 @@ The webhook function URL is public (`AuthType: NONE`), since GitHub must reach i
 | `src/github.ts`, `src/app-secret.ts` | GitHub App authentication and API calls. |
 | `src/alerts.ts` | Publishes alerts to the SNS topic. |
 | `src/config.ts` | Zod schemas for each handler's environment variables. |
+| `scripts/create-github-app.ts` | Registers the GitHub App from a manifest and stores its credentials (setup steps 2 and 3). |
 | `actions/docker-cache` | Composite action that gives a Docker build its BuildKit cache settings. |

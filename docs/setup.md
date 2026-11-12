@@ -27,7 +27,15 @@ The default runner images are the public `runs-on-v2.2-*` AMIs published by [Run
 
 ## 2. Create the GitHub App
 
-In the organization's settings, open **Developer settings → GitHub Apps → New GitHub App** and set:
+The quickest way is the script that registers the app from a manifest and stores its credentials, which also does step 3:
+
+```bash
+node scripts/create-github-app.ts --org my-org
+```
+
+It takes the same `AWS_PROFILE` and `AWS_REGION`, and `--stack` for a stack name other than `ec2-runners`. It opens a page in the browser that sends GitHub the app's webhook URL, permissions, and events; sign in as an organization owner and click **Create GitHub App**. GitHub then hands the app's ID, private key, and webhook secret back to the script, which writes them to the stack's secret and sends the browser on to install the app. Install it on the organization for all repositories or for the ones that should use these runners, then go to step 4. The script refuses to replace a secret that already holds an app's credentials unless you pass `--force`, and `--no-open` prints the page's address for a machine without a browser.
+
+To create the app by hand instead, open the organization's settings, open **Developer settings → GitHub Apps → New GitHub App**, and set:
 
 - **Webhook URL**: the `WebhookUrl` output.
 - **Webhook secret**: a random string, for example from `openssl rand -hex 32`. Keep it for step 3.
@@ -40,7 +48,7 @@ After creating the app, note the App ID, generate a private key (a `.pem` file d
 
 ## 3. Store the app's credentials
 
-The stack creates an empty Secrets Manager secret for the app. Put the App ID, private key, and webhook secret in it:
+Skip this step if `scripts/create-github-app.ts` created the app. The stack creates a Secrets Manager secret for the app holding `REPLACE_ME` placeholders. Put the App ID, private key, and webhook secret in it:
 
 ```bash
 aws secretsmanager put-secret-value \
