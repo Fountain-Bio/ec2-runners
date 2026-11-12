@@ -2,7 +2,7 @@
 
 Ephemeral self-hosted GitHub Actions runners for a GitHub organization, on EC2 Spot and AWS Lambda MicroVMs in your own AWS account. The whole system is one CloudFormation stack: three Lambda functions, a DynamoDB table, a VPC, and an S3 cache bucket.
 
-A job opts in with a label. A job that asks for `ec2` gets a fresh EC2 instance sized from its labels, and a job that asks for `microvm` gets a Lambda MicroVM that starts in about 10 seconds. Each runner runs one job and terminates itself.
+A job opts in with a label. A job that asks for `ec2` gets a fresh EC2 instance sized from its labels, and a job that asks for `microvm` gets a Lambda MicroVM. A MicroVM job starts about 15 seconds after it is queued and an EC2 job about 37 seconds after, at the median. Each runner runs one job and terminates itself.
 
 ```yaml
 jobs:
@@ -49,6 +49,7 @@ Coding agents can run the setup with the `setup-ec2-runners` skill in [`.agents/
 - [Usage](docs/usage.md): `runs-on` labels, the job environment, the cache bucket, MicroVM runners, and Docker builds.
 - [Operations](docs/operations.md): alerts and what to do about them, logs, debugging a job that stays queued, and known limits.
 - [Architecture](docs/architecture.md): how a queued job becomes a runner, the runner pool, and the source layout.
+- [Benchmarks](docs/benchmarks.md): measured start times and cost per job against GitHub-hosted runners.
 - [Contributing](CONTRIBUTING.md) and [Security](SECURITY.md).
 
 ## Agent skills

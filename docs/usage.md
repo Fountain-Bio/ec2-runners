@@ -54,7 +54,7 @@ The instance profile grants access to the cache bucket and the boot log group on
 
 ## MicroVM runners
 
-A job labelled `microvm` runs in an AWS Lambda MicroVM. From a job being queued to the job starting takes about 10 seconds, against about 30 to 45 for an EC2 runner, so short jobs such as path filters, status gates, and review bots spend more of their time working.
+A job labelled `microvm` runs in an AWS Lambda MicroVM. From a job being queued to the job starting takes about 15 seconds at the median, against about 37 for an EC2 runner, so short jobs such as path filters, status gates, and review bots spend more of their time working. GitHub-hosted runners start jobs in a few seconds and cost about the same for jobs this short, so keep a short job on them unless it must run in your AWS account; [Benchmarks](benchmarks.md) has the measurements.
 
 ```yaml
 jobs:
