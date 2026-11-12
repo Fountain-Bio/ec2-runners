@@ -54,6 +54,6 @@ Work through these in order:
 - A job that stays queued longer than `IdleMinutes` while its runner sits idle loses that runner to the janitor, and the next reconcile launches another. Raise `IdleMinutes` if jobs often wait that long.
 - When a job ends before it starts, for example when a newer push cancels it, the reconciler retires the runner launched for it: it deletes the registration, then terminates the instance. A runner that a queued job can still use is kept for that job. GitHub can assign a job to the runner in the moment between the reconciler's check and the deletion, which fails that job. This needs a job matching the runner's labels to be queued within that second.
 - The boot script downloads the actions runner from GitHub on each boot, which adds a few seconds. Baking it into a custom AMI at `/opt/ec2-runner` skips the download.
-- The default AMIs are built and published by RunsOn. To use your own, build an AMI and set `AmiOwner` and `AmiNamePrefix`, or pass `image=ami-…`.
+- The default AMIs are built and published by RunsOn. To use your own, build an AMI and set `AmiOwner` and `AmiNamePrefix`, or pass `image=ami-…` with an AMI in the stack's own account.
 - Linux only. Windows and GPU images would need GPU instance requirements and a PowerShell boot script.
 - One stack serves one GitHub organization. Repository-level and enterprise-level runners are not supported.

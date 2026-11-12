@@ -111,7 +111,7 @@ Accounts can start with the MicroVM quotas below the AWS defaults, and Service Q
 | `RunnerGroupId` | `1` | Organization runner group for registrations. |
 | `IdleMinutes` | `20` | Terminate a runner that has not started a job after this long. A backstop for runners the reconciler did not retire, such as one whose runner process failed to connect. |
 | `MaxMinutes` | `360` | Hard runner lifetime, enforced by the boot script and the janitor for instances and by Lambda for MicroVMs (at most 480). |
-| `AmiOwner`, `AmiNamePrefix` | RunsOn public images | Where `image=` names are looked up. |
+| `AmiOwner`, `AmiNamePrefix` | RunsOn public images | Where `image=` names are looked up. `image=ami-…` labels may name only AMIs owned by `AmiOwner` or by the stack's own account. |
 | `RunnerVersion` | `latest` | actions/runner version to download when the AMI does not have one at `/opt/ec2-runner`, and to build into the MicroVM image. The boot script checks the download against the SHA-256 digest GitHub publishes for the release asset, so the version must be 2.325.0 or later. |
 | `CpuBaselineFamily` | `m6i` | Slowest CPU a runner may get, as an instance family. Excludes older types such as `i3` and `m5d` that EC2's "current generation" filter still allows and that are often the cheapest Spot types with local SSDs. Empty turns the floor off. A compute-family reference such as `c6i` matches no instance type for jobs with 4 GiB or more per vCPU. |
 | `CacheRetentionDays` | `10` | Lifecycle expiry on the cache bucket. |

@@ -38,14 +38,21 @@ export interface Ami {
 const amiCache = new Map<string, { ami: Ami; at: number }>();
 const AMI_CACHE_MS = 60 * 60_000;
 
-// "image=ami-0123..." is used as-is. Any other value is an image name looked up
-// as <prefix><image>-* under the configured owner, newest first.
+// "image=ami-0123..." names one AMI, which must belong to the configured owner
+// or to this account. Any other value is an image name looked up as
+// <prefix><image>-* under the configured owner, newest first.
+//
+// The owner check matters because a runner registers with its job's labels
+// and GitHub gives it any queued job those labels cover, from any repository
+// the runner group allows. An AMI from an untrusted account could run a
+// modified runner and capture other repositories' jobs and secrets.
 export async function resolveAmi(ec2: Ec2, image: string, { owner, namePrefix }: { owner: string; namePrefix: string }): Promise<Ami> {
   const cached = amiCache.get(image);
   if (cached && Date.now() - cached.at < AMI_CACHE_MS) return cached.ami;
 
-  const params: DescribeImagesRequest = image.startsWith("ami-")
-    ? { ImageIds: [image] }
+  const byId = image.startsWith("ami-");
+  const params: DescribeImagesRequest = byId
+    ? { ImageIds: [image], Owners: [owner, "self"] }
     : {
         Owners: [owner],
         Filters: [
@@ -63,7 +70,11 @@ export async function resolveAmi(ec2: Ec2, image: string, { owner, namePrefix }:
   });
   Images.sort((a, b) => (b.CreationDate ?? "").localeCompare(a.CreationDate ?? ""));
   const image0 = Images[0];
-  if (!image0?.ImageId) throw new JobConfigError(`No AMI found for image=${image}`);
+  if (!image0?.ImageId) {
+    throw new JobConfigError(
+      byId ? `image=${image}: no such AMI owned by account ${owner} (the AmiOwner parameter) or by this account` : `No AMI found for image=${image}`,
+    );
+  }
   const architecture = image0.Architecture;
   if (architecture !== "x86_64" && architecture !== "arm64") {
     throw new JobConfigError(`AMI ${image0.ImageId} for image=${image} has unsupported architecture ${architecture}`);

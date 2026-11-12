@@ -255,6 +255,21 @@ test("resolveAmi reports an unknown AMI ID as a label error", async () => {
   await expect(resolveAmi(ec2, "ami-0000000000000dead", { owner: "1", namePrefix: "x-" })).rejects.toBeInstanceOf(JobConfigError);
 });
 
+test("resolveAmi accepts an AMI ID only from the configured owner or this account", async () => {
+  const inputs: unknown[] = [];
+  // EC2 returns nothing for an AMI ID whose owner is outside Owners.
+  const ec2 = {
+    send: async (cmd: { input: unknown }) => {
+      inputs.push(cmd.input);
+      return { Images: [] };
+    },
+  } as unknown as Ec2;
+  await expect(resolveAmi(ec2, "ami-0123456789abcdef0", { owner: "135269210855", namePrefix: "x-" })).rejects.toThrow(
+    /image=ami-0123456789abcdef0: no such AMI owned by account 135269210855 .* or by this account/,
+  );
+  expect(inputs[0]).toEqual({ ImageIds: ["ami-0123456789abcdef0"], Owners: ["135269210855", "self"] });
+});
+
 test("assertInstanceTypesExist rejects a spec that no instance type matches", async () => {
   const none = fakeEc2([], { GetInstanceTypesFromInstanceRequirementsCommand: { InstanceTypes: [] } });
   await expect(assertInstanceTypesExist(none.ec2, parseLabels(["ec2", "cpu=3"]), ami)).rejects.toThrow(/No x86_64 instance type has cpu=3/);
