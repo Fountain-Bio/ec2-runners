@@ -4,6 +4,45 @@ ec2-runners is one CloudFormation stack (`template.yaml`) with three Lambda func
 
 ## How a job gets a runner
 
+![ec2-runners architecture: GitHub sends a webhook to the Webhook Lambda, which records the job in DynamoDB and invokes the Reconciler Lambda; the reconciler registers a just-in-time runner with GitHub and launches an EC2 Spot instance or a Lambda MicroVM, whose runner then runs one job; the Janitor Lambda terminates idle and overdue runners.](images/architecture.svg)
+
+The numbered arrows in the diagram:
+
+1. GitHub sends the GitHub App's `workflow_job` webhook to the Webhook Lambda.
+2. The Webhook Lambda records the queued job in the jobs table and invokes the reconciler.
+3. The reconciler confirms with the GitHub API that the job is still queued and registers a just-in-time runner.
+4. The reconciler launches an EC2 Spot instance or a Lambda MicroVM for the runner.
+5. The runner connects to GitHub, which assigns it a queued job its labels cover. It runs that one job and shuts down.
+6. Every 5 minutes, the janitor terminates runners that sat idle too long or ran past `MaxMinutes`.
+
+The same steps for one EC2 job, in order:
+
+```mermaid
+sequenceDiagram
+  autonumber
+  participant GH as GitHub
+  participant WH as Webhook Lambda
+  participant DB as Jobs table
+  participant RC as Reconciler Lambda
+  participant VM as EC2 instance
+  GH->>WH: workflow_job "queued", signed
+  WH->>DB: record the queued job
+  WH-)RC: invoke asynchronously
+  RC->>DB: take the reconcile lock, read queued jobs
+  RC->>GH: list runners, confirm the job is still queued
+  Note over RC: match queued jobs to idle runners,<br/>launch only for jobs left without one
+  RC->>GH: register a just-in-time runner with the job's labels
+  RC->>VM: CreateFleet: Spot first, then On-Demand
+  VM->>GH: boot script starts the runner
+  GH->>VM: assign a queued job the runner's labels cover
+  Note over GH,VM: about 34 s from webhook to job running (median)
+  VM->>VM: run the job, then power off
+  GH->>WH: workflow_job "in_progress" and "completed"
+  WH->>DB: mark the job done
+```
+
+In detail:
+
 1. GitHub sends a `workflow_job` webhook to a Lambda function URL (`<stack>-webhook`). The function checks the HMAC signature and keeps only jobs whose labels include `ec2` or `microvm`. It records each queued job from a private repository in a DynamoDB table (`<stack>-jobs`), marks jobs done when they start or finish, and invokes the reconciler asynchronously.
 2. The reconciler (`<stack>-reconciler`) compares the queued jobs with the runners that could still take them: registered, idle, and either running or still launching. It launches a runner for each job those runners cannot cover. Before launching, it confirms with the GitHub API that the job is still queued, finds the newest matching AMI, and checks that some instance type matches the labels. It then registers a just-in-time runner with the job's labels and calls EC2 Fleet (`instant`) with attribute-based instance selection, one subnet per call in shuffled order, trying Spot with `price-capacity-optimized` in each subnet first, then On-Demand. A `microvm` job gets a Lambda MicroVM instead (see [MicroVM runners](#microvm-runners)).
 3. The instance boot script runs `run.sh --jitconfig`, executes the job, and powers off. The launch template sets shutdown behavior to `terminate`, so power-off deletes the instance.

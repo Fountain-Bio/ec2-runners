@@ -1,0 +1,65 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="960" height="540" viewBox="0 0 960 540" role="img" aria-labelledby="title desc">
+<title id="title">ec2-runners architecture</title>
+<desc id="desc">1. GitHub sends a workflow_job webhook to the Webhook Lambda, which checks its signature. 2. The Webhook Lambda records the queued job in the DynamoDB jobs table and invokes the Reconciler Lambda. 3. The Reconciler confirms with the GitHub API that the job is still queued and registers a just-in-time runner. 4. The Reconciler launches an EC2 Spot instance or a Lambda MicroVM. 5. The runner connects to GitHub, takes a job, runs it, and shuts down. 6. Every 5 minutes the Janitor Lambda terminates idle and overdue runners. EC2 runners share an S3 cache bucket, and the functions send alerts to an SNS topic.</desc>
+<defs><marker id="h" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="ah" d="M0,0 L10,5 L0,10 z"/></marker><marker id="t" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="ah" d="M0,0 L10,5 L0,10 z"/></marker></defs>
+<style>text{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','Noto Sans',Helvetica,Arial,sans-serif}.p{fill:#f6f8fa;stroke:#d1d9e0}.pr{fill:#ddf4ff;stroke:#54aeff}.pl{font-size:13px;font-weight:600;fill:#59636e}.n{fill:#ffffff;stroke:#818b98}.nr{fill:#ffffff;stroke:#2a78d6;stroke-width:1.5}.nt{font-size:13px;font-weight:600;fill:#1f2328}.ns{font-size:11.5px;fill:#59636e}.a{stroke:#59636e;stroke-width:1.5}.ad{stroke:#59636e;stroke-width:1.5;stroke-dasharray:5 4}.ah{fill:#59636e}.al{font-size:11.5px;fill:#59636e}.sc{fill:#2a78d6}.sn{font-size:11px;font-weight:700;fill:#ffffff}@media (prefers-color-scheme:dark){.p{fill:#151b23;stroke:#3d444d}.pr{fill:#0f2137;stroke:#1f6feb}.pl{fill:#9198a1}.n,.nr{fill:#0d1117}.n{stroke:#656c76}.nr{stroke:#3987e5}.nt{fill:#e6edf3}.ns,.al{fill:#9198a1}.a,.ad{stroke:#9198a1}.ah{fill:#9198a1}.sc{fill:#3987e5}}</style>
+<rect class="p" x="10" y="40" width="190" height="440" rx="10"/>
+<text class="pl" x="24" y="62">GitHub</text>
+<rect class="p" x="240" y="10" width="710" height="520" rx="10"/>
+<text class="pl" x="254" y="32">Your AWS account: one CloudFormation stack</text>
+<rect class="pr" x="740" y="40" width="200" height="440" rx="10"/>
+<text class="pl" x="754" y="62">Runners: one job each</text>
+<rect class="n" x="25" y="80" width="160" height="56" rx="6"/>
+<text class="nt" x="105.0" y="105.0" text-anchor="middle">GitHub App</text>
+<text class="ns" x="105.0" y="122.0" text-anchor="middle">workflow_job webhooks</text>
+<rect class="n" x="25" y="220" width="160" height="56" rx="6"/>
+<text class="nt" x="105.0" y="245.0" text-anchor="middle">GitHub API</text>
+<text class="ns" x="105.0" y="262.0" text-anchor="middle">jobs and runner registration</text>
+<rect class="n" x="270" y="80" width="170" height="56" rx="6"/>
+<text class="nt" x="355.0" y="105.0" text-anchor="middle">Webhook Lambda</text>
+<text class="ns" x="355.0" y="122.0" text-anchor="middle">checks the signature</text>
+<rect class="n" x="270" y="220" width="170" height="56" rx="6"/>
+<text class="nt" x="355.0" y="245.0" text-anchor="middle">Reconciler Lambda</text>
+<text class="ns" x="355.0" y="262.0" text-anchor="middle">matches jobs to runners</text>
+<rect class="n" x="270" y="380" width="170" height="56" rx="6"/>
+<text class="nt" x="355.0" y="405.0" text-anchor="middle">Janitor Lambda</text>
+<text class="ns" x="355.0" y="422.0" text-anchor="middle">every 5 minutes</text>
+<rect class="n" x="500" y="150" width="170" height="56" rx="6"/>
+<text class="nt" x="585.0" y="175.0" text-anchor="middle">DynamoDB</text>
+<text class="ns" x="585.0" y="192.0" text-anchor="middle">jobs table and lock</text>
+<rect class="n" x="500" y="300" width="170" height="56" rx="6"/>
+<text class="nt" x="585.0" y="325.0" text-anchor="middle">SNS alert topic</text>
+<text class="ns" x="585.0" y="342.0" text-anchor="middle">to email and chat</text>
+<rect class="n" x="760" y="70" width="160" height="46" rx="6"/>
+<text class="nt" x="840.0" y="90.0" text-anchor="middle">S3 cache bucket</text>
+<text class="ns" x="840.0" y="107.0" text-anchor="middle">shared by EC2 runners</text>
+<rect class="nr" x="760" y="150" width="160" height="56" rx="6"/>
+<text class="nt" x="840.0" y="175.0" text-anchor="middle">EC2 Spot instance</text>
+<text class="ns" x="840.0" y="192.0" text-anchor="middle">sized by the job's labels</text>
+<rect class="nr" x="760" y="270" width="160" height="56" rx="6"/>
+<text class="nt" x="840.0" y="295.0" text-anchor="middle">Lambda MicroVM</text>
+<text class="ns" x="840.0" y="312.0" text-anchor="middle">for short jobs</text>
+<path class="a" d="M185,108 H268" fill="none" marker-end="url(#h)"/>
+<circle class="sc" cx="226" cy="92" r="9"/><text class="sn" x="226" y="96" text-anchor="middle">1</text>
+<path class="a" d="M440,108 H585 V148" fill="none" marker-end="url(#h)"/>
+<circle class="sc" cx="470" cy="92" r="9"/><text class="sn" x="470" y="96" text-anchor="middle">2</text>
+<text class="al" x="484" y="96" text-anchor="start">record the job</text>
+<path class="a" d="M355,136 V218" fill="none" marker-end="url(#h)"/>
+<text class="al" x="364" y="182" text-anchor="start">invoke</text>
+<path class="a" d="M442,234 H585 V208" fill="none" marker-end="url(#h)" marker-start="url(#t)"/>
+<path class="a" d="M270,248 H187" fill="none" marker-end="url(#h)"/>
+<circle class="sc" cx="226" cy="232" r="9"/><text class="sn" x="226" y="236" text-anchor="middle">3</text>
+<path class="a" d="M440,262 H720 V178 H758" fill="none" marker-end="url(#h)"/>
+<path class="a" d="M720,262 V298 H758" fill="none" marker-end="url(#h)"/>
+<circle class="sc" cx="470" cy="262" r="9"/><text class="sn" x="470" y="266" text-anchor="middle">4</text>
+<text class="al" x="486" y="256" text-anchor="start">CreateFleet or RunMicrovm</text>
+<path class="a" d="M840,148 V118" fill="none" marker-end="url(#h)" marker-start="url(#t)"/>
+<path class="a" d="M840,480 V510 H105 V278" fill="none" marker-end="url(#h)"/>
+<circle class="sc" cx="470" cy="510" r="9"/><text class="sn" x="470" y="514" text-anchor="middle">5</text>
+<text class="al" x="486" y="505" text-anchor="start">the runner connects to GitHub and runs one job</text>
+<path class="ad" d="M440,408 H738" fill="none" marker-end="url(#h)"/>
+<circle class="sc" cx="470" cy="408" r="9"/><text class="sn" x="470" y="412" text-anchor="middle">6</text>
+<text class="al" x="486" y="402" text-anchor="start">terminate idle and overdue runners</text>
+<path class="ad" d="M355,276 V328 H498" fill="none" marker-end="url(#h)"/>
+<text class="al" x="364" y="322" text-anchor="start">alerts</text>
+</svg>
