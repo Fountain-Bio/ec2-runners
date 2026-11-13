@@ -125,6 +125,8 @@ Almost every job asked for local NVMe disks (`nvme=true`), so these are the chea
 
 ### Cost per job
 
+![Cost per job in US cents. 2 vCPU x64: ec2-runners 0.12, GitHub-hosted 0.79. 4 vCPU x64: 0.42 and 2.71. 8 vCPU x64: 0.68 and 3.64. 16 vCPU x64: 1.07 and 8.12. 16 vCPU arm64: 0.84 and 4.88.](images/cost-per-job.svg)
+
 Each EC2 runner's cost is its whole lifetime, from launch to power-off, so it includes the boot and any idle time, at the median Spot price of its type (or the On-Demand price for On-Demand launches), plus its 40 GiB gp3 volume and public IPv4 address. The GitHub-hosted column prices the same job's run time on the GitHub-hosted runner with the same vCPU count and architecture, rounded up to whole minutes.
 
 | Runner size | Jobs | ec2-runners per job | GitHub-hosted per job | GitHub-hosted ÷ ec2-runners |

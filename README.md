@@ -32,6 +32,14 @@ jobs:
 - **Alerts.** Labels that can never launch, launches that keep failing, misconfigured runner groups, and Lambda errors go to an SNS topic, formatted for chat channels connected through Amazon Q Developer.
 - **Serverless control plane.** The webhook, reconciler, and janitor are Lambda functions with state in DynamoDB, so the stack has no instances of its own to patch. The VPC has no NAT gateway, and runners accept no inbound connections.
 
+## Cost
+
+Over two weeks of one organization's CI, EC2 Spot runners cost 5 to 8 times less per job than GitHub-hosted runners with the same vCPU count, counting each instance's boot and idle time. [docs/benchmarks.md](docs/benchmarks.md) has the method, start times, and MicroVM costs.
+
+![Cost per job in US cents. 2 vCPU x64: ec2-runners 0.12, GitHub-hosted 0.79. 4 vCPU x64: 0.42 and 2.71. 8 vCPU x64: 0.68 and 3.64. 16 vCPU x64: 1.07 and 8.12. 16 vCPU arm64: 0.84 and 4.88.](docs/images/cost-per-job.svg)
+
+## Runner images
+
 Runners use the public Ubuntu images that [RunsOn](https://runs-on.com) publishes as ports of GitHub's hosted runner images, so actions that work on `ubuntu-latest` generally work here. You can point the stack at your own AMIs.
 
 ## Getting started
