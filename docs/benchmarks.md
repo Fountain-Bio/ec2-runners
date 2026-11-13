@@ -43,7 +43,15 @@ From the stack's logs, per launch (1,374 runners):
 
 Inside the boot script, the actions runner download, checksum, and extraction take 5.2 s at the median, and Docker starts in parallel in 7.9 s. 97% of these runners used local NVMe disks.
 
-The slow tail comes from the reconcile, not the boot. Of 56 launches that failed and were retried during the 14 days, 50 hit the account's Spot instance quota (`MaxSpotInstanceCountExceeded`) during bursts, and each retry waits 30 seconds. An account whose Spot vCPU quota covers its peak concurrency avoids most of that tail; see [Account quotas](setup.md#account-quotas). Launch returned to runner listening, the boot itself, is 21 s at the median and 27 s at p90.
+The slow tail came from the reconcile, not the boot. The account's Spot vCPU quota was 256 when the window began, and bursts of parallel jobs hit it: 53 launches failed with `MaxSpotInstanceCountExceeded` and were retried, each retry 30 seconds later, the last on 2026-11-05. The quota is now 512, twice the peak of 272 Spot vCPUs the runners reached, and no launch has failed on it since. The table splits the launches at 2026-11-06:
+
+| Webhook received → job running | Quota 256 (680 launches) | Quota 512 (825 launches) |
+| --- | --- | --- |
+| p50 | 39 s | 32 s |
+| p90 | 152 s | 42 s |
+| Launches retried for the Spot quota | 53 | 0 |
+
+Size the Spot vCPU quota above your CI's peak concurrency; see [Account quotas](setup.md#account-quotas). Launch returned to runner listening, the boot itself, is 21 s at the median and 27 s at p90.
 
 ### Where a MicroVM runner's start time goes
 
@@ -137,4 +145,4 @@ MicroVM jobs in this sample were short: 11 seconds of job at the median, and 19 
 - **Short jobs** (seconds of work, no Docker): GitHub-hosted runners start fastest, and their cost is comparable. Use `microvm` for short jobs that must run in your AWS account, or when GitHub-hosted minutes are exhausted.
 - **Jobs of a minute or more, or that need more than 2 vCPUs**: EC2 Spot runners cost 5 to 8 times less than GitHub-hosted runners of the same size, and the 30 to 40 seconds of start time is a smaller share of the job.
 - **Docker builds**: use `nvme=true` and the S3 layer cache. Without the cache, a fresh EC2 runner rebuilds every layer.
-- **Bursts**: raise the Spot vCPU quota to cover peak concurrency; quota errors are the main source of slow starts.
+- **Bursts**: keep the Spot vCPU quota above peak concurrency. A quota at the peak tripled this deployment's p90 start time.
