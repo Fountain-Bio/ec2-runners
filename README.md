@@ -4,6 +4,8 @@ Ephemeral self-hosted GitHub Actions runners for a GitHub organization, on EC2 S
 
 A job opts in with a label. A job that asks for `ec2` gets a fresh EC2 instance sized from its labels, and a job that asks for `microvm` gets a Lambda MicroVM. A MicroVM job starts about 15 seconds after it is queued and an EC2 job about 37 seconds after, at the median. Each runner runs one job and terminates itself.
 
+![ec2-runners architecture: GitHub webhooks reach a Webhook Lambda, a Reconciler Lambda launches EC2 Spot instances or Lambda MicroVMs that each run one job, and a Janitor Lambda cleans up. docs/architecture.md describes each step.](docs/images/architecture.svg)
+
 ```yaml
 jobs:
   test:
