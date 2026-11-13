@@ -1,0 +1,46 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="760" height="394" viewBox="0 0 760 394" role="img" aria-labelledby="title desc">
+<title id="title">Cost per job: ec2-runners on EC2 Spot against GitHub-hosted runners of the same size</title>
+<desc id="desc">2 vCPU x64: ec2-runners 0.12 cents, GitHub-hosted 0.79 cents (6.7 times as much); 4 vCPU x64: ec2-runners 0.42 cents, GitHub-hosted 2.71 cents (6.4 times as much); 8 vCPU x64: ec2-runners 0.68 cents, GitHub-hosted 3.64 cents (5.3 times as much); 16 vCPU x64: ec2-runners 1.07 cents, GitHub-hosted 8.12 cents (7.6 times as much); 16 vCPU arm64: ec2-runners 0.84 cents, GitHub-hosted 4.88 cents (5.8 times as much). Source: docs/benchmarks.md.</desc>
+<style>text{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','Noto Sans',Helvetica,Arial,sans-serif;fill:#1f2328}.t{font-size:16px;font-weight:600}.s{font-size:12px;fill:#59636e}.l{font-size:13px}.v{font-size:12px;font-variant-numeric:tabular-nums}.k{font-size:12px;fill:#59636e;font-variant-numeric:tabular-nums}.g{stroke:#d1d9e0;stroke-width:1}.b{stroke:#818b98;stroke-width:1}.e{fill:#2a78d6}.h{fill:#eb6834}@media (prefers-color-scheme:dark){text{fill:#e6edf3}.s,.k{fill:#9198a1}.g{stroke:#3d444d}.b{stroke:#656c76}.e{fill:#3987e5}.h{fill:#d95926}}</style>
+<text class="t" x="0" y="20">Cost per job, in US cents</text>
+<text class="s" x="0" y="40">ec2-runners on EC2 Spot (median Spot price, whole instance lifetime incl. boot and idle) against GitHub-hosted runners</text>
+<text class="s" x="0" y="56">with the same vCPU count, billed per started minute. 1,373 jobs, us-west-2, 2026-10-29 to 2026-11-12.</text>
+<rect class="e" x="0" y="70" width="12" height="12" rx="2"/><text class="l" x="18" y="80">ec2-runners</text>
+<rect class="h" x="112" y="70" width="12" height="12" rx="2"/><text class="l" x="130" y="80">GitHub-hosted</text>
+<line class="g" x1="118.0" y1="94" x2="118.0" y2="346.0"/>
+<text class="k" x="118.0" y="362.0" text-anchor="middle">0¢</text>
+<line class="g" x1="231.3" y1="94" x2="231.3" y2="346.0"/>
+<text class="k" x="231.3" y="362.0" text-anchor="middle">2¢</text>
+<line class="g" x1="344.7" y1="94" x2="344.7" y2="346.0"/>
+<text class="k" x="344.7" y="362.0" text-anchor="middle">4¢</text>
+<line class="g" x1="458.0" y1="94" x2="458.0" y2="346.0"/>
+<text class="k" x="458.0" y="362.0" text-anchor="middle">6¢</text>
+<line class="g" x1="571.3" y1="94" x2="571.3" y2="346.0"/>
+<text class="k" x="571.3" y="362.0" text-anchor="middle">8¢</text>
+<text class="l" x="106" y="119.0" text-anchor="end">2 vCPU x64</text>
+<path class="e" d="M118.0,100.0 H121.4 A3.3999999999999986,3.3999999999999986 0 0 1 124.8,103.4 V110.6 A3.3999999999999986,3.3999999999999986 0 0 1 121.4,114.0 H118.0 Z"/>
+<text class="v" x="130.8" y="111.0">0.12¢</text>
+<path class="h" d="M118.0,116.0 H158.8 A4,4 0 0 1 162.8,120.0 V126.0 A4,4 0 0 1 158.8,130.0 H118.0 Z"/>
+<text class="v" x="168.8" y="127.0">0.79¢ (6.7× as much)</text>
+<text class="l" x="106" y="171.0" text-anchor="end">4 vCPU x64</text>
+<path class="e" d="M118.0,152.0 H137.8 A4,4 0 0 1 141.8,156.0 V162.0 A4,4 0 0 1 137.8,166.0 H118.0 Z"/>
+<text class="v" x="147.8" y="163.0">0.42¢</text>
+<path class="h" d="M118.0,168.0 H267.6 A4,4 0 0 1 271.6,172.0 V178.0 A4,4 0 0 1 267.6,182.0 H118.0 Z"/>
+<text class="v" x="277.6" y="179.0">2.71¢ (6.4× as much)</text>
+<text class="l" x="106" y="223.0" text-anchor="end">8 vCPU x64</text>
+<path class="e" d="M118.0,204.0 H152.5 A4,4 0 0 1 156.5,208.0 V214.0 A4,4 0 0 1 152.5,218.0 H118.0 Z"/>
+<text class="v" x="162.5" y="215.0">0.68¢</text>
+<path class="h" d="M118.0,220.0 H320.3 A4,4 0 0 1 324.3,224.0 V230.0 A4,4 0 0 1 320.3,234.0 H118.0 Z"/>
+<text class="v" x="330.3" y="231.0">3.64¢ (5.3× as much)</text>
+<text class="l" x="106" y="275.0" text-anchor="end">16 vCPU x64</text>
+<path class="e" d="M118.0,256.0 H174.6 A4,4 0 0 1 178.6,260.0 V266.0 A4,4 0 0 1 174.6,270.0 H118.0 Z"/>
+<text class="v" x="184.6" y="267.0">1.07¢</text>
+<path class="h" d="M118.0,272.0 H574.1 A4,4 0 0 1 578.1,276.0 V282.0 A4,4 0 0 1 574.1,286.0 H118.0 Z"/>
+<text class="v" x="584.1" y="283.0">8.12¢ (7.6× as much)</text>
+<text class="l" x="106" y="327.0" text-anchor="end">16 vCPU arm64</text>
+<path class="e" d="M118.0,308.0 H161.6 A4,4 0 0 1 165.6,312.0 V318.0 A4,4 0 0 1 161.6,322.0 H118.0 Z"/>
+<text class="v" x="171.6" y="319.0">0.84¢</text>
+<path class="h" d="M118.0,324.0 H390.5 A4,4 0 0 1 394.5,328.0 V334.0 A4,4 0 0 1 390.5,338.0 H118.0 Z"/>
+<text class="v" x="400.5" y="335.0">4.88¢ (5.8× as much)</text>
+<line class="b" x1="118" y1="94" x2="118" y2="346.0"/>
+</svg>
