@@ -52,6 +52,14 @@ const CACHE_MS = 60 * 60_000;
 // GitHub fails a job that has waited this long for a runner, so the backfill
 // looks only at workflow runs created within it.
 const QUEUE_LIMIT_MS = 24 * 60 * 60_000;
+// GitHub's job API can answer 404 for a job in the first seconds after the job
+// is queued. A job queued more recently than NOT_FOUND_GRACE_MS that answers
+// 404 stays queued, and the invocation asks GitHub again every
+// NOT_VISIBLE_RETRY_MS until the grace period ends; an older job that answers
+// 404 is taken to be deleted.
+const NOT_FOUND_GRACE_MS = 2 * 60_000;
+const NOT_VISIBLE_RETRY_MS = 5_000;
+const MAX_NOT_VISIBLE_PASSES = NOT_FOUND_GRACE_MS / NOT_VISIBLE_RETRY_MS;
 // Repositories the backfill queries at once.
 const BACKFILL_CONCURRENCY = 4;
 
@@ -63,7 +71,7 @@ const ec2 = new EC2Client({});
 const microvms = new LambdaMicrovmsClient({ retryMode: "adaptive", maxAttempts: 6 });
 let cachedLock: ReconcileLock | undefined;
 
-type LaunchOutcome = "launched" | "already started" | "gone" | "failed" | "will retry" | "error" | "deferred";
+type LaunchOutcome = "launched" | "already started" | "not visible yet" | "gone" | "failed" | "will retry" | "error" | "deferred";
 
 type PassResult = { queued: number; available: number; outcomes: Record<string, LaunchOutcome>; retired: string[] };
 
@@ -148,9 +156,13 @@ async function backfillQueuedJobs(config: ReconcilerConfig): Promise<void> {
 }
 
 // Runs passes until no launch failed for a reason a retry may get past, such
-// as Spot capacity or a vCPU quota that a finishing job frees up. Retrying here,
-// RECONCILE_RETRY_SECONDS apart, gets such a job its runner well before the
-// next scheduled reconcile, which can be 5 minutes away.
+// as Spot capacity or a vCPU quota that a finishing job frees up, and until
+// GitHub shows every just-queued job. Retrying here gets such a job its runner
+// well before the next scheduled reconcile, which can be 5 minutes away.
+// Failed launches are retried RECONCILE_RETRY_SECONDS apart for up to
+// MAX_PASSES passes. A job GitHub does not show yet is asked about every
+// NOT_VISIBLE_RETRY_MS (never slower than the launch retry) for up to
+// NOT_FOUND_GRACE_MS, since GitHub usually shows it within seconds.
 async function reconcileUntilLaunched(
   config: ReconcilerConfig,
   context: Pick<Context, "getRemainingTimeInMillis"> | undefined,
@@ -158,9 +170,14 @@ async function reconcileUntilLaunched(
 ): Promise<PassResult> {
   const retryMs = config.RECONCILE_RETRY_SECONDS * 1000;
   let result = await reconcilePass(config, context);
-  for (let pass = 1; pass < MAX_PASSES && launchFailed(result) && remaining() > LAUNCH_TIME_BUDGET_MS + retryMs; pass++) {
-    log("retrying failed launches", { inSeconds: config.RECONCILE_RETRY_SECONDS, outcomes: result.outcomes });
-    await new Promise((resolve) => setTimeout(resolve, retryMs));
+  for (let pass = 1; ; pass++) {
+    const waitingForGitHub = pass < MAX_NOT_VISIBLE_PASSES && Object.values(result.outcomes).includes("not visible yet");
+    const retryingLaunches = pass < MAX_PASSES && launchFailed(result);
+    if (!waitingForGitHub && !retryingLaunches) break;
+    const delayMs = waitingForGitHub ? Math.min(NOT_VISIBLE_RETRY_MS, retryMs) : retryMs;
+    if (remaining() <= LAUNCH_TIME_BUDGET_MS + delayMs) break;
+    log("retrying failed launches", { inSeconds: delayMs / 1000, outcomes: result.outcomes });
+    await new Promise((resolve) => setTimeout(resolve, delayMs));
     result = await reconcilePass(config, context);
   }
   return result;
@@ -274,13 +291,19 @@ async function forEachLimit<T>(items: readonly T[], limit: number, fn: (item: T)
 // launch, or a failure that is either permanent (bad labels) or retried.
 async function reconcileJob(config: ReconcilerConfig, jobs: JobStore, gh: GitHubClient, job: QueuedJob): Promise<LaunchOutcome> {
   // The jobs table can miss an "in_progress" or "completed" event, so GitHub
-  // decides whether the job still needs a runner. A 404 means the job's
-  // repository was deleted or the app lost access to it.
+  // decides whether the job still needs a runner. A 404 for a job queued
+  // within NOT_FOUND_GRACE_MS means GitHub's API does not show the new job
+  // yet, so the job stays queued and the next pass asks again. A later 404
+  // means the job's repository was deleted or the app lost access to it.
   const current = await gh.getJob(job.repo, job.jobId).catch((err) => {
     if (isGitHubError(err, 404)) return undefined;
     throw err;
   });
   if (!current) {
+    if (job.queuedAt !== undefined && Date.now() - job.queuedAt < NOT_FOUND_GRACE_MS) {
+      log("GitHub does not show the job yet, will retry", { jobId: job.jobId, repo: job.repo });
+      return "not visible yet";
+    }
     await jobs.markDone(job.jobId);
     return "gone";
   }

@@ -302,8 +302,17 @@ function ec2With({ instances = [] as object[], instanceTypes = ["c7a.xlarge"], f
   };
 }
 
-const queuedRow = (jobId: number, labels: string[], { repo = "example-org/app", idleRunners = 0 } = {}) =>
-  table.set(jobId, { jobId, repo, runId: 777, labels, status: "queued", launchFailures: 0, idleRunners });
+const queuedRow = (jobId: number, labels: string[], { repo = "example-org/app", idleRunners = 0, queuedAt = undefined as number | undefined } = {}) =>
+  table.set(jobId, {
+    jobId,
+    repo,
+    runId: 777,
+    labels,
+    status: "queued",
+    launchFailures: 0,
+    idleRunners,
+    ...(queuedAt === undefined ? {} : { queuedAt }),
+  });
 
 // The lock's DynamoDB behavior is covered by test/integration. Here every
 // reconcile takes the lock and runs one pass.
@@ -569,6 +578,31 @@ test("reconciler keeps launching other jobs when one job's GitHub lookup fails",
   expect(ghCalls.filter((c) => c.key.endsWith("generate-jitconfig")).map((c) => c.body.name)).toEqual([expect.stringMatching(/^ec2-runners-556-/)]);
   expect(table.get(555)?.status).toBe("queued");
   expect(table.get(557)?.status).toBe("done");
+});
+
+test("reconciler keeps a just-queued job that GitHub answers 404 for, and drops it after 2 minutes", async () => {
+  // GitHub's job API can lag the queued webhook by a few seconds.
+  queuedRow(559, ["ec2"], { queuedAt: Date.now() });
+  ghRoutes["GET /repos/example-org/app/actions/jobs/559"] = { status: 404, body: { message: "Not Found" } };
+
+  expect((await reconciler()).outcomes).toEqual({ 559: "not visible yet" });
+  expect(table.get(559)?.status).toBe("queued");
+  // The invocation asked again on each of its passes, more passes than a failed launch gets.
+  expect(callsTo("GET /repos/example-org/app/actions/jobs/559")).toBe(24);
+  expect(fleetCalls()).toHaveLength(0);
+
+  advanceClock(2 * 60_000);
+  expect((await reconciler()).outcomes).toEqual({ 559: "gone" });
+  expect(table.get(559)?.status).toBe("done");
+});
+
+test("reconciler launches for a just-queued job once GitHub shows it", async () => {
+  queuedRow(560, ["ec2"], { queuedAt: Date.now() });
+  ghRoutes["GET /repos/example-org/app/actions/jobs/560"] = { status: 404, body: { message: "Not Found" } };
+  expect((await reconciler()).outcomes).toEqual({ 560: "not visible yet" });
+
+  githubJob("example-org/app", 560);
+  expect((await reconciler()).outcomes).toEqual({ 560: "launched" });
 });
 
 test("reconciler fails a job whose labels no instance type matches, and alerts once", async () => {

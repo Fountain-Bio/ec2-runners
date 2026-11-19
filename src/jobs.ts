@@ -22,6 +22,9 @@ const QueuedRow = z.object({
   // Runners launched for this job that the janitor terminated after they sat
   // idle, with the job still queued.
   idleRunners: z.int().default(0),
+  // When the row was added, in milliseconds since the epoch. Rows written
+  // before this field existed lack it.
+  queuedAt: z.int().optional(),
 });
 export type QueuedJob = z.infer<typeof QueuedRow>;
 
@@ -42,12 +45,12 @@ export class JobStore {
   // already exists, which covers a redelivered webhook, a "queued" event that
   // arrives after the job's "in_progress" event, and the reconciler's
   // backfill finding a job the webhook already recorded.
-  async markQueued(job: Omit<QueuedJob, "idleRunners">, now = Date.now()): Promise<boolean> {
+  async markQueued(job: Omit<QueuedJob, "idleRunners" | "queuedAt">, now = Date.now()): Promise<boolean> {
     try {
       await this.doc.send(
         new PutCommand({
           TableName: this.table,
-          Item: { ...job, status: "queued", launchFailures: 0, idleRunners: 0, expiresAt: this.expiresAt(now) },
+          Item: { ...job, status: "queued", launchFailures: 0, idleRunners: 0, queuedAt: now, expiresAt: this.expiresAt(now) },
           ConditionExpression: "attribute_not_exists(jobId)",
         }),
       );

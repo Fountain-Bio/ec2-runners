@@ -73,7 +73,7 @@ const queuedIds = async () => (await store.listQueued()).map((j) => j.jobId).sor
 test("a queued job is listed and expires a day after it was queued", async () => {
   const now = Date.parse("2026-10-08T12:00:00Z");
   await store.markQueued(job(1, ["ec2", "cpu=4"]), now);
-  expect(await store.listQueued()).toContainEqual({ ...job(1, ["ec2", "cpu=4"]), idleRunners: 0 });
+  expect(await store.listQueued()).toContainEqual({ ...job(1, ["ec2", "cpu=4"]), idleRunners: 0, queuedAt: now });
   expect(await row(1)).toMatchObject({ status: "queued", launchFailures: 0, expiresAt: now / 1000 + 24 * 60 * 60 });
 });
 

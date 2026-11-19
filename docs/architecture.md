@@ -66,7 +66,7 @@ Reconciles never overlap. Each pass holds a lock item in the jobs table (`jobId`
 
 A job can still get a second runner in a narrow window: GitHub marks a runner busy a moment before the job's status changes, and a reconcile in between sees the job queued with no free runner. The spare runner serves the next queued job that fits it, or the janitor terminates it after `IdleMinutes`.
 
-One reconcile launches all uncovered jobs in parallel, so a burst of queued jobs does not wait on a line of separate runs. A failed launch is retried 30 seconds later, up to 6 passes per invocation, and the 5-minute schedule picks the job up after that.
+One reconcile launches all uncovered jobs in parallel, so a burst of queued jobs does not wait on a line of separate runs. A failed launch is retried 30 seconds later, up to 6 passes per invocation, and the 5-minute schedule picks the job up after that. GitHub's job API can answer 404 for a job in the first seconds after the job is queued. The reconciler keeps such a job queued and asks GitHub again every 5 seconds, launching as soon as GitHub shows the job. A 404 more than 2 minutes after the job's `queued` event means the job's repository was deleted or the app lost access to it, and the reconciler stops tracking the job.
 
 ## MicroVM runners
 
